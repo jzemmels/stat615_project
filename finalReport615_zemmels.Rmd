@@ -1,0 +1,768 @@
+---
+title: "A Random-Effect Markov Random Field Model for Cartridge Case Comparison Algorithms"
+subtitle: "STAT 615 Final Report"
+author: "Joe Zemmels"
+output: pdf_document
+geometry: margin=2cm
+urlcolor: blue
+header-includes:
+  - \usepackage{titling}
+  - \setlength{\droptitle}{-7em}
+  - \usepackage{titlesec}
+  - \usepackage{hyperref}
+  - \titlespacing{\title}{0pt}{\parskip}{-\parskip}
+---
+
+```{r global.options,include = FALSE}
+knitr::opts_chunk$set(fig.align = "center",warning = FALSE,message = FALSE,fig.pos = "htbp")
+```
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+```
+
+
+## Introduction
+
+The Congruent Matching Cells (CMC) algorithms are a family of algorithms used to quantify the similarity between two cartridge cases. 
+Briefly, the algorithms involve partitioning two cartridge case scans into a grid of "cells" (typically 7x7 or 8x8), comparing each cell in one scan to the other scan, and classifying each cell as "congruent matching" or "non-congruent matching" depending on the results of the comparison.
+The number of congruent matching cells, the "CMC count," is used as the similarity score for that pairwise comparison. 
+One would expect the CMC score for matching comparisons, in which both cartridge cases were fired from the same firearm, to be larger than for non-matching comparisons, where the compared cartridge cases were fired from two different firearms.
+In-practice, if the ground-truth matching/non-matching status of a pair of scans was unknown, then one would use a CMC count decision boundary to classify the pair as matching or non-matching.
+The current recommendation in the CMC literature is to use 6 CMCs as the decision boundary, but there is very little theoretical or empirical justification for this choice.
+
+In order for a scientific method to be considered admissible evidence in court, the [Daubert Standard](https://www.law.cornell.edu/wex/daubert_standard) requires that its error rate be known.
+In the case of the CMC algorithms, an "error" refers to classifying a non-matching scan as a match (a false positive) or a matching scan as a non-match (a false negative).
+Using a CMC count decision boundary, this will occur if a CMC count falls on the "wrong side" of the boundary.
+To satisfy Daubert, we therefore need to determine the expected proportion of comparisons that will be misclassified.
+Recent work on the CMC algorithms has focused on modeling the distribution of known match and known non-match CMC counts for the purpose of obtaining a model-based estimate of the error rate.
+\autoref{fig:conceptualPlot} depicts distributions of known match and known non-match CMC counts from a large number of comparisons.
+With a CMC count boundary set at 6, the darker-shaded regions show the false positive (gold) and false negative (blue) classifications.
+
+```{r echo=FALSE,fig.height=2.5,fig.width = 5,fig.cap='\\label{fig:conceptualPlot} CMC count distributions for non-matching (gold) and matching (blue) comparisons. A CMC count threshold of 6 (vertical line) is used to classify matches and non-matches. The darker-shaded regions represent false positives (gold) and false negatives (blue), respectively.'}
+data.frame(y = c(dbinom(x = 0:20,size = 30,prob = 2/30),dbinom(x = 0:20,size = 30,prob = 10/30))) %>%
+  mutate(x = rep(0:20,time = 2),
+         Type = factor(rep(c("Non-match","Match"),each = nrow(.)/2),
+                       levels = c("Non-match","Match"))) %>%
+  mutate(misclass = ((Type == "Non-match" & x > 5.5) | (Type == "Match" & x < 5.5))) %>%
+  ggplot(aes(x=x,y=y,fill = Type
+             ,colour = Type
+             ,alpha = misclass)) +
+  geom_bar(stat = "identity",position = "identity") +
+  theme_bw() +
+  coord_cartesian(ylim = c(NA,.3),expand = FALSE) +
+  geom_vline(xintercept = 5.5,size = 1.25,linetype = "dashed") +
+  theme(legend.position = "bottom") +
+  scale_fill_manual(values = c("#E1BE6A","#6a8de1"),aesthetics = c("fill","colour")) +
+  scale_alpha_manual(values = c(.25,.85)) +
+  guides(alpha = "none") +
+  labs(x = "CMC Count",
+       y = "Probability")
+```
+
+
+<!-- Most recently, [Zhang (2021)](https://doi.org/10.1016/j.forsciint.2021.110912) proposed modeling a CMC count as the sum of dependent Bernoulli trials using the Bahadur-Lazarsfeld model which estimates the correlation between pairs of cells. -->
+<!-- However, this model assumes that the pairwise correlation is the same between all pairs of cells and across all cartridge case comparisons. -->
+<!-- In this project, the proposed model will include a different dependency structure. -->
+
+<!-- Can we incorporate repeated measure and spatial dependencies in a model for the CMC counts? -->
+
+We wish to determine whether we can obtain a model-based estimate of the CMC method error rate.
+
+## Data
+
+We have performed the pairwise CMC matching procedure for a set of 102 cartridge case scans resulting in $\binom{102}{2} = 5151$ comparisons.
+These 102 scans were fired from 4 barrels that are given a capital letter ID $F$ (24 scans), $G$ (24 scans), $R$ (27 scans), or $U$ (27 scans).
+There are 1254 known matching comparisons and 3897 known non-matching comparisons.
+
+\autoref{tab:cmcResults} and \autoref{fig:cmcPlot} show an example of a set of CMC results for a single comparison between Scan 1 and Scan 2. 
+In particular, the 16 row table shows the cell indices and associated CMC classification for the first two rows of the cells in the figure.
+A CMC classification of 1 corresponds to a Congruent Matching Cell and 0 a non-CMC, colored blue and red in the figure, respectively.
+Cells classified as "NA" are not considered in the comparison.
+We obtain such a data set of 64 CMC classifications (0, 1, or NA) for each pairwise comparison.
+Summing the CMC classifications per comparison (after removing NAs) yields the CMC counts.
+
+```{r,echo = FALSE}
+load("cmcResults_match.RData")
+
+cmcResults_match %>%
+  slice(1:16) %>%
+  mutate(`CMC Classif.` = ifelse(`Cell Index` == "2, 3","0",as.character(`CMC Classif.`))) %>%
+  select(`Cell Index`,`CMC Classif.`) %>%
+  # bind_rows(data.frame(`Cell Index` = "...",
+  #                      `CMC Classif.` = "...")) %>%
+  # t() %>%
+  knitr::kable(caption = "\\label{tab:cmcResults} An example of CMC results for a comparison between two matching scans. The cells are indexed by the row and column. The CMC classification is either 1 (a CMC), 0 (a non-CMC), or NA (not considered).")
+```
+
+```{r, echo = FALSE,message=FALSE,warning=FALSE,fig.cap='\\label{fig:cmcPlot} A visualization of the comparison results shown in the table above. CMCs are colored blue, non-CMCs are colored red, and NA cells are not shown.'}
+load("~/cmas/crossValidation/topMatch_randomTrain/topMatch_largerTrainSet_train_CMCs/K015iZ1_vs_K017xZ3.RData")
+
+load("matchScans.RData")
+
+library(patchwork)
+
+kmCMCPlot <- cmcR::cmcPlot(reference = matchScans$K015iZ1,target = matchScans$K017xZ3,
+                           reference_v_target_CMCs = CMCs %>% 
+                             filter(direction == "refToTarget" & xThresh == 25 & 
+                                      corrThresh > .29 & corrThresh < .31),
+                           target_v_reference_CMCs = CMCs %>% 
+                             filter(direction == "targetToRef" & xThresh == 25 & 
+                                      corrThresh > .29 & corrThresh < .31),
+                           x3pNames = c("K015iZ1","K017xZ3"))
+
+plt1 <- kmCMCPlot$originalMethodCMCs_reference_v_target
+
+plt1$layers[[4]]$aes_params$size <- 2.5
+
+plt1 <- plt1  +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        strip.text = element_blank()) +
+  geom_text(data = data.frame(x3p = c("K015iZ1","K017xZ3"),
+                              type = c("\n","\n"),
+                              lab = c("Scan 1","Scan 2"),
+                              x = c(1600,1650),
+                              y = c(1550,1550)),
+            aes(x = x,y = y,label = lab),size = 3) +
+  ggplot2::scale_colour_manual(values = c("#a50026","#313695"),
+                               aesthetics = c("fill","colour"),
+                               labels = c("non-CMC","CMC"))
+
+ggsave(filename = "kmOriginalMethod.pdf",plot = plt1,width = 5,height = 5)
+
+invisible(knitr::plot_crop("kmOriginalMethod.pdf",quiet = TRUE))
+
+knitr::include_graphics(path = "kmOriginalMethod.pdf")
+```
+
+\autoref{fig:obsCMCCounts} shows the observed CMC count distributions, faceted by barrel pairing. Along the main diagonal are the CMC counts when two scans fired from the same firearm are compared. The off-diagonal plots show the CMC counts when scans fired from different firearms are compared. The lower-diagonal plots aren't shown as they are equivalent to the upper-diagonal.
+
+```{r,echo=FALSE}
+load("simulatedResults_modelz_entireFourBarrelsGFUR_initial.RData")
+load("originalMethodCMCs_entireFourBarrels.RData")
+```
+
+```{r,echo=FALSE,fig.cap='\\label{fig:obsCMCCounts} The observed CMC count results for all 5151 comparisons between 102 scans. As we might expect, matching scans (scans fired from the same barrel) result in larger CMC scores on average.' ,fig.height=3,fig.width=5}
+originalMethodCMCs_entireFourBarrels %>%
+  group_by(reference,target,refBarrel,targBarrel,type) %>%
+  summarise(count = sum(originalMethodClassif,na.rm = TRUE)) %>%
+  mutate(refBarrelNew = ifelse(targBarrel == "G" & refBarrel %in% c("F","U","R"),"G",
+                               ifelse(targBarrel == "F" & refBarrel %in% c("U","R"),"F",
+                                      ifelse(targBarrel == "U" & refBarrel == "R","U",
+                                             refBarrel))),
+         targBarrelNew = ifelse(targBarrel == "G" & refBarrel %in% c("F","U","R"),refBarrel,
+                                ifelse(targBarrel == "F" & refBarrel %in% c("U","R"),refBarrel,
+                                       ifelse(targBarrel == "U" & refBarrel == "R",refBarrel,
+                                              targBarrel)))) %>%
+  # filter(refBarrel == "R") %>%
+  mutate(refBarrel = refBarrelNew,
+         targBarrel = targBarrelNew)  %>%
+  # arrange(refBarrel,targBarrel)  %>%
+  select(-c(refBarrelNew,targBarrelNew)) %>%
+  group_by(refBarrel,targBarrel,count) %>%
+  tally()  %>%
+  group_by(refBarrel,targBarrel) %>%
+  mutate(dens = n/sum(n)) %>%
+  mutate(refBarrel = factor(refBarrel,levels = c("G","F","U","R"),labels = c("Barrel G","Barrel F","Barrel U","Barrel R")),
+         targBarrel = factor(targBarrel,levels = c("G","F","U","R"),labels = c("Barrel G","Barrel F","Barrel U","Barrel R")))  %>%
+  ggplot(aes(x=count,y = dens)) +
+  geom_bar(stat = "identity",position = "identity") +
+  facet_grid(rows = vars(refBarrel),
+             cols = vars(targBarrel)) +
+  theme_bw() +
+  labs(x = "CMC Count",y = "Relative Frequency")
+```
+
+
+## Methods
+
+The proposed model is intended to incorporate anticipated sources of dependencies between different sets of CMC results.
+\autoref{fig:dependencyDiagram} is a conceptual diagram to convey these different dependencies.
+
+```{r, echo=FALSE,fig.cap='\\label{fig:dependencyDiagram} A conceptual diagram intended to convey the different sources of dependency that one might anticipate between CMC counts. We assume that barrels are randomly selected from a relevant population. From each of these barrels, we assume that multiple cartridges cases are fired and scanned (barrel-level repeated measure). We then perform the CMC comparison procedure between every pair of scans (scan-level repeated measure). Each comparison yields a set of CMC results that we anticipate to be spatially dependent.'}
+knitr::include_graphics("gmrf_dependencyDiagram.png",dpi = 150)
+```
+
+### Model Structure
+
+Let $i,j$ index $S$ scans, $i,j = 1,...,S$. 
+Denote a comparison between scan $i$ and scan $j$ as $i,j$.
+Define function $b(\cdot)$ that maps a scan index to the barrel from which it was fired (e.g., $b(i) = A$ if scan $i$ originated from barrel $A$).
+As we are working with a closed set of four barrels with known labels, define the set of barrels as $\pmb{B} = \{G,F,U,R\}$.
+Let $\pmb{y}_{i,j} \in \{0,1\}^{N_{i,j}}$ be the vector of CMC results for the comparison $i,j$ where $N_{i,j}$ is the total number of cells in comparison $i,j$.
+Identify a particular cell in comparison $i,j$ with its [row,column] index $[k,l]$.
+<!-- , $k = 1,...,R_{i,j}$ and $l = 1,...,C_{i,j}$.  -->
+Then let $y_{i,j,[k,l]} \in \pmb{y}_{i,j}$ be the CMC result for cell $[k,l]$ of comparison $i,j$.
+Assume $y_{i,j,[k,l]} | p_{i,j,[k,l]} \sim$ Bernoulli$(p_{i,j,[k,l]})$ where
+<!-- $$ -->
+<!-- \text{logit}(p_{i,j,[k,l]}) = \underbrace{\alpha_0}_{\text{Intercept}} + \underbrace{\beta_{b(i)} + \beta_{b(j)} + \gamma_{b(i)b(j)}}_{\text{Barrel-level R.E. w/ Inter.}} + \underbrace{\kappa_i + \kappa_j}_{\text{Scan-level R.E.}} + \underbrace{\lambda_{[k,l]}}_{\text{MRF Term}}. -->
+<!-- $$ -->
+
+\begin{align*}
+\text{logit}(p_{i,j,[k,l]}) = \underbrace{\alpha_0}_{\text{Intercept}} &+ \underbrace{\sum_{A \in \pmb{B}} \beta_A \cdot I\left(b(i) = A\text{ or }b(j) = A\right)}_{\text{Barrel-level Random Effect}} \\
+& + \underbrace{\sum_{A,C \in \pmb{B}: A \neq C} \gamma_{AC} I\left(b(i) = A\text{ and }b(j) = C\text{ or }b(i) = C\text{ and }b(j) = A\right)}_{\text{Barrel-level Interaction}} \\
+& + \underbrace{\kappa_i + \kappa_j}_{\text{Scan-level R.E.}} + \underbrace{\lambda_{[k,l]}}_{\text{MRF Term}}.
+\end{align*}
+
+The $\beta_A I(\hdots)$ terms behave like random intercepts if at least one of the two scans were fired from barrel $A$.
+The $\gamma_{AC}I(\hdots)$ terms are the interaction between the different barrels.\footnote{Note that this model is slightly different from the one I provided in the original proposal. I ran into many issues with implementing the original model's random effect structure, so this was the closest that I could get to it.}
+<!-- $\beta_{b(i)}, \beta_{b(j)}$ for barrels $b(i)$ and $b(j)$ are random-effect parameters accounting for the fact that we observe multiple CMC scores per barrel. $\gamma_{b(i)b(j)}$ is their interaction. -->
+$\kappa_i$ and $\kappa_j$ are random-effect parameters intended to account for the fact that we observe multiple CMC scores from scans $i$ and $j$. $\lambda_{[k,l]}$ accounts for spatial dependence by way of a Markov Random Field.
+
+We assume independence between parameters and for $i = 1,...,S$ and $A, C \in \pmb{B}$, with $N(a,b)$ denoting a normal distribution with mean $a$ and variance $b$, the following priors:
+\begin{align*}
+\alpha_0 &\sim N(0,\tau_0^{-1}) \\
+\log(\tau_0) &\sim Gam(1,0.00001) \\
+\beta_{A} &\overset{ind}{\sim} N(0,\tau_{A}^{-1}) \\
+\log(\tau_{A}) &\overset{ind}{\sim} Gam(1,0.00005) \\
+\gamma_{AC} &\overset{ind}{\sim} N(0,\tau_{AC}^{-1}) \\
+\log(\tau_{AC}) &\overset{ind}{\sim} Gam(1,0.00005) \\
+\kappa_i &\overset{ind}{\sim} N(0,\tau_{k,i}^{-1}) \\
+\log(\tau_{k,i}) &\overset{ind}{\sim} Gam(1,0.00005).
+\end{align*}
+
+Finally, for the spatial term $\lambda_{[k,l]}$, define a "queen" neighborhood system $\mathcal{N}_{[k,l]} = \{\lambda_{m,n} : |m - k| \leq 1, |n - l| \leq 1 \text{ but } [m,n] \neq [k,l]\}$. For $\pmb{\lambda}_{-[k,l]} \equiv \{\lambda_{m,n} : m \neq k \text{ and } n \neq l\}$, we assume that
+
+\begin{align*}
+\lambda_{[k,l]} | \pmb{\lambda}_{-[k,l]}, \tau_l &\overset{ind}{\sim} N\left(\frac{1}{|\mathcal{N}_{[k,l]}|} \sum_{\lambda_{m,n} \in \mathcal{N}_{[k,l]}} \lambda_{[m,n]}, \frac{\tau_l^{-1}}{|\mathcal{N}_{[k,l]}|}\right) \\
+\log(\tau_l) &\sim Gam(1,0.00005).
+\end{align*}
+
+<!-- The random-effects part of the model is similar to a model used for glass evidence proposed in [Aitken et al. (2007)](https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.335.3316&rep=rep1&type=pdf) (where cartridge case is to glass fragment as barrel is to glass pane). -->
+
+The model will be fit using the [`INLA`](https://www.r-inla.org/) package. The data and code used in this paper can be found at [a GitHub repo link here].
+
+### Diagnostics
+
+<!-- We will assess the convergence of the INLA procedure by considering diagnostics [XYZ]. -->
+
+To determine quality of model fit, we will calculate a posterior predictive p-value for the CMC counts. Let $C_{i,j} = \sum_{k,l} y_{i,j,[k,l]}$ be the CMC count for the comparison between scan $i$ and scan $j$. As we are primarily interested in the barrel-level behavior of the CMC counts, we will consider the average of all CMC counts within each barrel pairing. More precisely, for two barrels $A,C \in \pmb{B}$, define the set of index pairs in which one scan was fired from barrel $A$ and the other scan from barrel $C$ as $\pmb{I}_{AC} = \{(i,j) : b(i) = A\text{ and }b(j) = C\text{ or }b(i) = C\text{ and }b(j) = A\}$. The average CMC count for the barrel pairing $AC$ is defined as:
+$$
+\bar{C}_{AC} = \frac{1}{|\pmb{I}_{AC}|} \sum_{(i,j) \in \pmb{I}_{AC}} C_{i,j}
+$$
+
+
+The following procedure describes a method for computing a posterior predictive p-value for each CMC count averaged within a barrel pairing.
+
+First identify $\pmb{I}_{AC}$ for two barrels $A,C \in \pmb{B}$. Then repeat for $t = 1,...,T$ the following:
+
+- For each comparison $(i,j) \in \pmb{I}_{AC}$:
+
+- For each cell indexed by $[k,l]$:
+
+- Sample $p_{i,j,[k,l]}^{(t)}$ using `INLA::inla.posterior.sample`
+
+- Sample $y_{i,j,[k,l]}^{(t)} \overset{ind}{\sim} Bern(p_{i,j,[k,l]}^{(t)})$
+
+- Compute the CMC count: $C_{i,j}^{(t)} = \sum_{k,l} y_{i,j,[k,l]}^{(t)}$
+
+- Compute the average of the simulated CMC counts across $\pmb{I}_{AC}$: $\bar{C}_{AC}^{(t)} = \frac{1}{|\pmb{I}_{AC}|} \sum_{(i,j) \in \pmb{I}_{AC}} C_{i,j}^{(t)}$.
+
+- Compute the posterior predictive p-value for this barrel pairing: $p_{AC} = \frac{1}{T} \sum_{t=1}^T I\left(\bar{C}_{AC}^{(t)} \leq \bar{C}_{AC}\right)$.
+
+Optimally, each $p_{AC}$ should be near 0.5.\footnote{Alternatively, we could compare the simulated CMC counts for each comparison $i,j$. However, this is of less scientific interest since the barrel of origin determines whether two scans are matching.}
+
+
+<!-- For each comparison indexed by $i,j$: -->
+
+<!-- - For $t = 1,...,T$: -->
+
+<!--   - For each cell indexed by $[k,l]$: -->
+
+<!--     - Sample $p_{i,j,[k,l]}^{(t)}$ using `INLA::inla.posterior.sample` -->
+
+<!--     - Sample $y_{i,j,[k,l]}^{(t)} \overset{ind}{\sim} Bern(p_{i,j,[k,l]}^{(t)})$ -->
+
+<!--   - Calculate $C_{i,j}^{(t)} = \sum_{k,l} y_{i,j,[k,l]}^{(t)}$ -->
+
+<!-- - Compute the posterior predictive p-value: -->
+<!-- $$ -->
+<!-- p_{i,j} = \frac{1}{T} \sum_{t=1}^T I\left(C_{i,j}^{(t)} \leq C_{i,j}\right) -->
+<!-- $$ -->
+<!-- where $C_{i,j} = \sum_{k,l} y_{i,j,[k,l]}$ is the observed CMC count for comparison $i,j$. Optimally, each $p_{i,j}$ should be near 0.5. -->
+
+### Answering the Scientific Question
+
+We are interested in the distribution of the CMC count, $C_{i,j} = \sum_{k,l} y_{i,j,[k,l]}$. We can use the simulated CMC counts $\{C_{i,j}^{(t)} : i,j = 1,...,S,t=1,...,T\}$ to estimate this distribution.
+
+Specifically, because we know the ground truth matching/non-matching status for each comparison $i,j$, the error rate can be estimated by calculating the proportion of CMC counts that fall on the "wrong side" of some threshold, say 6. Mathematically, letting $M = \{i,j : b(i) = b(j)\}$ denote the set of matching index pairs and $N = \{i,j : b(i) \neq b(j)\}$ the non-match index pairs, the $t$-th estimate of the error is given as:
+$$
+\widehat{\text{Error}}^{(t)} = \frac{1}{\binom{S}{2}} \left[ \sum_{i,j \in M} I(C_{i,j}^{(t)} < 6) + \sum_{i.j \in N} I(C_{i,j}^{(t)} \geq 6)\right].
+$$
+
+We can obtain a point estimate of the error rate by averaging the $\widehat{\text{Error}}^{(t)}$s.
+
+While not directly related to the scientific question, we will examine and interpret the estimated posterior distributions for the model parameters in the discussion.
+
+## Results
+
+### Diagnostics
+
+The `INLA` R package was used to fit this model.
+The model fitting took approximately 113 minutes.
+Due to memory constraints, a Gaussian approximation was used to estimate the conditional posterior distributions for the parameters given the hyperparameters (e.g., $p(\alpha_0 | \tau_0, \pmb{y}))$.\footnote{Using the more "expensive" Laplace approximation on a much smaller data set was maxing out my computer's 30 Gb of RAM and causing it to crash.}
+Additionally, due to the number of hyperparameters, we use a simplified Empirical Bayes integration strategy in which only the posterior modes of the hyperparameters are used (specified by `control.inla = list(int.strategy = "eb")`).
+After experimenting with a smaller data set, it was determined that these two changes resulted in qualitatively similar estimates of the posterior as the more expensive alternatives.
+
+\autoref{tab:postPred} below shows the posterior predictive p-values for each pair of barrels $A,C \in \pmb{B}$.
+A total of $T = 100$ data sets were used to estimate these p-values.
+We can see that some of the p-values deviate from 0.5 indicating that additional investigation of the model fit is warranted.
+
+
+```{r,echo=FALSE,cache = TRUE}
+simulatedResults_modelz_entireFourBarrelsGFUR_initial %>%
+  group_by(refBarrel,targBarrel,postRep) %>%
+  summarise(sampCount = mean(sampCount)) %>%
+  left_join(originalMethodCMCs_entireFourBarrels %>%
+              tidyr::separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+              dplyr::filter(reference != target) %>%
+              mutate(refBarrel = str_sub(reference,-2,-2),
+                     targBarrel = str_sub(target,-2,-2)) %>%
+              group_by(comparisonName,refBarrel,targBarrel) %>%
+              summarise(obsCount = sum(originalMethodClassif,na.rm = TRUE)) %>%
+              group_by(refBarrel,targBarrel) %>%
+              summarise(obsCount = mean(obsCount)),
+            by = c("refBarrel","targBarrel")) %>%
+  mutate(type = ifelse(refBarrel == targBarrel,"match","non-match")) %>%
+  group_by(type,refBarrel,targBarrel) %>%
+  summarise(pVal = mean(sampCount <= obsCount)) %>%
+  select(c(refBarrel,targBarrel,type,pVal)) %>%
+  rename(`Barrel 1` = refBarrel,
+         `Barrel 2` = targBarrel,
+         `Ground Truth` = type,
+         `p-value` = pVal) %>%
+  knitr::kable(caption = "\\label{tab:postPred} The posterior predictive p-values for the within-barrel pairing average CMC counts. Some of these values deviate from 0.5 indicating that there may be a lack of fit.")
+```
+
+
+### Answering the Scientific Question
+
+\autoref{fig:obsSimComparison} compares the observed and simulated CMC count distributions with a CMC cutoff of 6.
+Again, the darker-shaded blue and gold regions represent the false negatives and false positives, respectively.
+We can see that the simulated distribution appears to model the behavior of the non-matches well, but doesn't capture the tail behavior of the matches.
+\autoref{fig:obsSimComparison_facet} shows the simulated data faceted by barrel pairing with a vertical line drawn at the observed average CMC count.
+
+```{r,echo=FALSE,cache = TRUE,fig.cap='\\label{fig:obsSimComparison} Comparison of the observed CMC count distributions (as in \\autoref{fig:obsCMCCounts}) and simulated CMC distributions. The non-match CMC counts appear to be well-represented by the model while the observed match comparisons exhibit a higher variability than the simulated. Using a CMC cutoff of 6, false positives and false negatives are shaded in dark gold and blue, respectively.',fig.height=4,fig.width=5}
+obsSimResults <- bind_rows(simulatedResults_modelz_entireFourBarrelsGFUR_initial %>%
+                             group_by(type,sampCount) %>%
+                             summarise(dens = n()) %>%
+                             mutate(dens = dens/sum(dens)) %>%
+                             ungroup()  %>%
+                             mutate(misclass = ifelse((type == "match" & sampCount < 6) | (type == "non-match" & sampCount >= 6),TRUE,FALSE),
+                                    type = factor(type,levels = c("non-match","match"),labels = c("Non-match","Match")),
+                                    dataType = "Simulated") %>%
+                             rename(Type = type,
+                                    count = sampCount),
+                           originalMethodCMCs_entireFourBarrels %>%
+                             tidyr::separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+                             dplyr::filter(reference != target) %>%
+                             mutate(refBarrel = str_sub(reference,-2,-2),
+                                    targBarrel = str_sub(target,-2,-2),
+                                    type = ifelse(refBarrel == targBarrel,"Match","Non-match")) %>%
+                             group_by(comparisonName,type) %>%
+                             summarise(obsCount = sum(originalMethodClassif,na.rm = TRUE))  %>%
+                             group_by(type,obsCount) %>%
+                             summarise(dens = n()) %>%
+                             mutate(dens = dens/sum(dens)) %>%
+                             mutate(misclass = ifelse((type == "Match" & obsCount < 6) | (type == "Non-match" & obsCount >= 6),TRUE,FALSE),
+                                    dataType = "Observed") %>%
+                             rename(Type = type,
+                                    count = obsCount))
+
+obsSimResults %>%
+  mutate(dataType = factor(dataType,levels = c("Observed","Simulated")),
+         Type = factor(Type,levels = c("Non-match","Match"))) %>%
+  ggplot(aes(x = count,y = dens,fill = Type)) +
+  geom_bar(aes(alpha = misclass),stat = "identity",position = "identity") +
+  geom_bar(aes(colour = Type),fill = NA,stat = "identity",position = "identity") +
+  theme_bw() +
+  # coord_cartesian(ylim = c(NA,.3),expand = FALSE) +
+  geom_vline(xintercept = 5.5,size = 1.25,linetype = "dashed") +
+  theme(legend.position = "bottom") +
+  scale_fill_manual(values = c("#E1BE6A","#6a8de1"),aesthetics = c("fill","colour")) +
+  scale_alpha_manual(values = c(.25,.85)) +
+  guides(alpha = "none") +
+  labs(x = "CMC Count",
+       y = "Relative Frequency") +
+  facet_wrap(~ dataType,ncol = 1)
+```
+
+\autoref{tab:errorRates} below summarizes the observed and simulated CMC method error rates using a cutoff of 6.
+As expected based on the figure above, the simulated error rate seems to underestimate the overall observed error rate, in particular due to underestimating the false negative error rate.
+
+```{r,echo = FALSE}
+obsError <- originalMethodCMCs_entireFourBarrels %>%
+  tidyr::separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel== targBarrel,"match","non-match")) %>%
+  group_by(comparisonName,type) %>%
+  summarise(obsCount = sum(originalMethodClassif,na.rm = TRUE)) %>%
+  mutate(misclass = ifelse((type == "match" & obsCount < 6) | (type == "non-match" & obsCount >= 6),TRUE,FALSE)) %>%
+  pull(misclass) %>%
+  mean()
+
+obsFalsePos <- originalMethodCMCs_entireFourBarrels %>%
+  tidyr::separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel== targBarrel,"match","non-match")) %>%
+  group_by(comparisonName,type) %>%
+  summarise(obsCount = sum(originalMethodClassif,na.rm = TRUE)) %>%
+  filter(type == "non-match") %>%
+  mutate(falsePos = ifelse((type == "non-match" & obsCount >= 6),TRUE,FALSE)) %>%
+  pull(falsePos) %>%
+  mean()
+
+obsFalseNeg <- originalMethodCMCs_entireFourBarrels %>%
+  tidyr::separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel== targBarrel,"match","non-match")) %>%
+  group_by(comparisonName,type) %>%
+  summarise(obsCount = sum(originalMethodClassif,na.rm = TRUE)) %>%
+  filter(type == "match") %>%
+  mutate(falseNeg = ifelse((type == "match" & obsCount < 6),TRUE,FALSE)) %>%
+  pull(falseNeg) %>%
+  mean()
+
+simError <- simulatedResults_modelz_entireFourBarrelsGFUR_initial %>%
+  mutate(misclass = ifelse((type == "match" & sampCount < 6) | (type == "non-match" & sampCount >= 6),TRUE,FALSE)) %>%
+  pull(misclass) %>%
+  mean()
+
+simFalsePos <- simulatedResults_modelz_entireFourBarrelsGFUR_initial %>%
+  filter(type == "non-match") %>%
+  mutate(falsePos = ifelse((type == "non-match" & sampCount >= 6),TRUE,FALSE)) %>%
+  pull(falsePos) %>%
+  mean()
+
+simFalseNeg <- simulatedResults_modelz_entireFourBarrelsGFUR_initial %>%
+  filter(type == "match") %>%
+  mutate(falseNeg = ifelse((type == "match" & sampCount < 6),TRUE,FALSE)) %>%
+  pull(falseNeg) %>%
+  mean()
+
+tibble(Error = c("Overall","False Positive","False Negative"),
+       Observed = round(c(obsError,obsFalsePos,obsFalseNeg),3),
+       Simulated = round(c(simError,simFalsePos,simFalseNeg),3)) %>%
+  knitr::kable(caption = "\\label{tab:errorRates} Comparison between the overall, false positive, and false negative error rates for the observed and simulated data using a CMC count threshold of 6. As evidenced in \\autoref{fig:obsSimComparison}, the false negative rate seems to be underestimated by the model.")
+```
+
+
+<!-- [Compare the simulated error rate to CMC error rate using scans fired from the same barrel, but not used to fit the model here. Also, compare the simulated error rate to error rates of scans fired from completely different barrels. These comparisons will demonstrate how "generalizable" the model is to gradually new data.] -->
+
+### Parameter Estimates
+
+In this section, we will examine and interpret the estimated posterior distributions for the individual terms in the model.
+
+\autoref{fig:barrelEffects} shows estimated posterior marginal distributions for the $\beta_A$ and $\gamma_{AC}$ random effect terms of the model.
+The plots on the diagonal show the $\beta_A$ posterior densities for each $A \in \pmb{B}$ while the off-diagonal plots show the $\gamma_{AC}$ interaction densities.
+The locations of the $\beta_A$ posterior densities are associated with the average CMC count for the match comparisons for each barrel.
+For example, referencing \autoref{fig:obsCMCCounts}, the within-barrel F comparisons had higher CMC counts on average compared to the within-barrel G comparisons.
+This is reflected in the fact that the posterior distribution for $\beta_F$ is located higher than that of $\beta_G$.
+The same can be said for the $\gamma_{AC}$ posterior densities, although the association is less obvious because the observed non-match distributions all look relatively homogeneous.
+
+```{r,cache = TRUE,echo=FALSE,eval=TRUE,fig.cap='\\label{fig:barrelEffects} Estimated posterior densities for the barrel and barrel interaction random effect terms. Higher-located densities correspond to comparisons that result in larger CMC counts.',fig.width=5,fig.height=3}
+# INLAutils::plot_fixed_marginals(simulatedResults_modelz_entireFourBarrelsGFUR_initial,priors = TRUE) 
+# 
+# INLAutils::plot_hyper_marginals(simulatedResults_modelz_entireFourBarrelsGFUR_initial)
+# 
+# plt <- INLAutils::plot_marginals_fitted(simulatedResults_modelz_entireFourBarrelsGFUR_initial)
+# 
+# plt
+# 
+# plt$data %>%
+#   filter(plot == "Fitted Values") %>%
+#   filter(mean > 0) %>%
+#   ggplot(aes(x = ID,y = mean)) +
+#   geom_point()
+# 
+# INLAutils::plot_random_effects(simulatedResults_modelz_entireFourBarrelsGFUR_initial,type = "line")
+
+# inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.random <- inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial$marginals.random
+# 
+# save(inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.random,file = "inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.random.RData")
+
+load("inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.random.RData")
+
+randomDistributions <-  inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.random %>%
+  .[1:10] %>%
+  map2_dfr(.y = names(.),
+           function(dat,name){
+             
+             dat %>%
+               map_dfr(~ as.data.frame(.x)) %>%
+               mutate(name = name)
+             
+           })
+
+randomDistributions %>%
+  rename(parameter = name) %>%
+  mutate(rowInd = case_when(parameter == "barrelG" ~ 1,
+                            parameter == "barrelGbarrelF" ~ 1,
+                            parameter == "barrelGbarrelU" ~ 1,
+                            parameter == "barrelGbarrelR" ~ 1,
+                            parameter == "barrelF" ~ 2,
+                            parameter == "barrelFbarrelU" ~ 2,
+                            parameter == "barrelFbarrelR" ~ 2,
+                            parameter == "barrelU" ~ 3,
+                            parameter == "barrelUbarrelR" ~ 3,
+                            parameter == "barrelR" ~ 4),
+         colInd = case_when(parameter == "barrelG" ~ 1,
+                            parameter == "barrelGbarrelF" ~ 2,
+                            parameter == "barrelGbarrelU" ~ 3,
+                            parameter == "barrelGbarrelR" ~ 4,
+                            parameter == "barrelF" ~ 2,
+                            parameter == "barrelFbarrelU" ~ 3,
+                            parameter == "barrelFbarrelR" ~ 4,
+                            parameter == "barrelU" ~ 3,
+                            parameter == "barrelUbarrelR" ~ 4,
+                            parameter == "barrelR" ~ 4)) %>%
+  ggplot(aes(x = x,y =y)) +
+  geom_line() +
+  facet_grid(rows = vars(rowInd),
+             cols = vars(colInd),
+             scales = "free_y",
+             labeller = labeller(.rows = c("Barrel G","Barrel F","Barrel U","Barrel R") %>% set_names(1:4),
+                                 .cols = c("Barrel G","Barrel F","Barrel U","Barrel R") %>% set_names(1:4))) +
+  theme_bw() +
+  theme(axis.title = element_blank())
+```
+
+The 95% credible intervals for the $\kappa_i$ terms are shown in \autoref{fig:scanCredIntervals}.
+The alpha-numeric scan labels are shown on the y-axis.
+Lower credible intervals correspond to scans that have smaller CMC counts when used in a comparison, on average.
+Such a plot can be useful for identifying particular scans that may need to be reprocessed.
+Note that the last 19 credible intervals are all $(-0.302,0.306)$.
+Indeed, the estimated posterior distributions are all equal for these 19 scans as well.
+This behavior calls for some additional investigation.
+
+```{r,eval=FALSE,echo=FALSE}
+inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.random$scanID[(329766 - 101):329766] %>%
+  map2_dfr(.y = names(.),
+           function(dat,name){
+             
+             as.data.frame(dat) %>%
+               mutate(name = name)
+             
+           }) %>%
+  ggplot(aes(x=x,y=y)) +
+  geom_line() +
+  facet_wrap(~ name)
+```
+
+
+```{r,fig.height=8,echo=FALSE,fig.cap='\\label{fig:scanCredIntervals} 95\\% credible intervals for the scan-level random effect terms. A line is drawn at 0 for reference. Higher intervals correspond to scans that lead to larger CMC counts on average. It is unclear why the last 19 interval estimates are the exact same.'}
+# inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_summary.random_scanID <- inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial$summary.random$scanID %>%
+#   slice((329766 - 101):329766) %>%
+#   left_join(data.frame(scanName = names(scanIndicator)) %>%
+#               mutate(ID = (329766 - 101):329766),
+#             by = "ID")
+
+# save(inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_summary.random_scanID,file = "inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_summary.random_scanID.RData")
+
+load("inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_summary.random_scanID.RData")
+
+inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_summary.random_scanID %>%
+  mutate(scanName = factor(scanName,levels = rev(scanName))) %>%
+  ggplot(aes(x = scanName,xend = scanName)) +
+  geom_segment(aes(y = `0.025quant`, yend= `0.975quant`)) +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.title = element_blank(),
+        axis.text.y = element_text(size = 5)) +
+  geom_hline(yintercept = 0,colour = "black")
+```
+
+
+\autoref{fig:spatialEffects} shows the estimated posterior distributions for each spatial term $\lambda_{[k,l]}$, plotted in [row,column] order. 
+The fill of each plot corresponds to the value of their MAP estimates.
+We can see that the cells on the edge of the scans tend to have higher MAP estimates than in the middle indicating that cells tend to be classified as CMCs more often.
+The spread of the posterior distributions gives us an indication for how "confident" we can be in a particular cells classification.
+Wider-spread distributions correspond to cells that have many NAs (e.g., in the 4 corners) while more peaked distributions seem to have many 0s and 1s (e.g., along the edges).
+
+```{r,echo=FALSE,cache=TRUE,fig.cap='\\label{fig:spatialEffects} Estimated posterior densities for the 64 spatial terms plotted by their [row,column] index. The fill of each plot corresponds to the value of the MAP estimate for each spatial term. The model seems to have "learned" a spatial pattern in the CMC counts that cells near the middle of each scan (where there are often little to no cartridge case observations) are classified as CMCs less often than near the edges of the scans.'}
+# load("inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial.RData")
+# 
+# inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.random_cellID <- inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial$marginals.random$cellID
+# 
+# simulatedResults_modelz_entireFourBarrelsGFUR_initial_marginals.random_cellID <- inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.random_cellID %>%
+#   map_dfr(~ as.data.frame(.)) %>%
+#   mutate(cellID = rep(1:64,each = nrow(.)/64)) %>%
+#   left_join(expand.grid(colInd = 1:8,rowInd = 1:8) %>%   
+#               mutate(cellID = 1:64),
+#             by = "cellID") %>%
+#   left_join(expand.grid(colInd = 1:8,rowInd = 1:8) %>%   
+#               mutate(cellID = 1:64) %>%
+#               left_join(inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial$summary.random$cellID %>%
+#                           dplyr::select(ID,mode),
+#                         by = c("cellID" = "ID")),
+#             by = c("colInd","rowInd","cellID")) %>%
+#   rename(Column = colInd,
+#          Row = rowInd)
+# 
+# save(simulatedResults_modelz_entireFourBarrelsGFUR_initial_marginals.random_cellID,file = "simulatedResults_modelz_entireFourBarrelsGFUR_initial_marginals.random_cellID.RData")
+
+load("simulatedResults_modelz_entireFourBarrelsGFUR_initial_marginals.random_cellID.RData")
+
+simulatedResults_modelz_entireFourBarrelsGFUR_initial_marginals.random_cellID %>%
+  ggplot(aes(x=x,y=y)) +
+  geom_rect(aes(xmin = min(x),xmax = max(x),
+                ymin = min(y),ymax = 6,
+                fill = mode),
+            alpha = .1) +
+  geom_line() +
+  geom_text(aes(label = paste0("[",Row,", ",Column,"]"),x = -1,y = 5.1),check_overlap = TRUE,size = 3) +
+  facet_grid(rows = vars(Row),
+             col = vars(Column)) +
+  scale_fill_gradient2(low = "purple",high = "orange") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        strip.text = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_text(size = 6)) +
+  coord_cartesian(expand = FALSE,ylim = c(NA,6),xlim = c(-2,2))
+```
+
+\autoref{fig:hyperparams} shows the estimated posterior marginal distributions for the $\tau$ precision hyperparameters.
+Note the differences in the x-scale across each plot.
+These distributions are reflective of the (inverse) variability observed in the preceding figures.
+
+```{r,echo = FALSE,fig.cap='\\label{fig:hyperparams} Estimated posterior marginal densities for the precision hyperparameters. Note the difference in the x-scale across each plot.',fig.width=5,fig.height=3}
+# inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.hyperpar <- inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial$marginals.hyperpar
+# 
+# save(inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.hyperpar,file = "inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.hyperpar.RData")
+
+load("inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.hyperpar.RData")
+
+hyperParamMarginals <- inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_marginals.hyperpar %>%
+  map2_dfr(.y = names(.),
+           function(dat,name){
+             
+             as.data.frame(dat) %>%
+               mutate(name = name)
+             
+           })
+
+hyperParamMarginals %>%
+  filter((name == "Precision for barrelG" & x < 100) |
+           (name == "Precision for barrelF" & x < 100) |
+           (name == "Precision for barrelU" & x < 50) |
+           (name == "Precision for barrelR" & x < 100) |
+           (name == "Precision for barrelGbarrelF" & x < 1000) |
+           (name == "Precision for barrelGbarrelR" & x < 2500) |
+           (name == "Precision for barrelGbarrelU" & x < 500) |
+           (name == "Precision for barrelFbarrelR" & x < 100) |
+           (name == "Precision for barrelFbarrelU" & x < 60000) |
+           (name == "Precision for barrelUbarrelR" & x < 30000) |
+           name == "Precision for cellID" |
+           name == "Precision for scanID") %>%
+  mutate(name = factor(name,
+                       levels = c("Precision for barrelG","Precision for barrelGbarrelF","Precision for barrelGbarrelU","Precision for barrelGbarrelR",
+                                       "Precision for barrelF","Precision for barrelFbarrelU","Precision for barrelFbarrelR",
+                                       "Precision for barrelU","Precision for barrelUbarrelR",
+                                       "Precision for barrelR",
+                                       "Precision for cellID","Precision for scanID"),
+                       labels = c("Precision for Barrel G R.E.","Precision for Barrel G-Barrel F R.E.","Precision for Barrel G-Barrel U R.E.","Precision for Barrel G-Barrel R R.E.",
+                                       "Precision for Barrel F R.E.","Precision for Barrel F-Barrel U R.E.","Precision for Barrel F-Barrel R R.E.",
+                                       "Precision for Barrel U R.E.","Precision for Barrel U-Barrel R R.E.",
+                                       "Precision for Barrel R R.E.",
+                                       "Precision for Spatial R.E.","Precision for Scan R.E."))) %>%
+  ggplot(aes(x=x,y=y)) +
+  geom_line() +
+  facet_wrap(~ name,scales = "free") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 4),
+        axis.text = element_text(size = 4)) +
+  theme(axis.title = element_blank())
+```
+
+## Discussion & Conclusion
+
+Our estimated error rate seems to underestimate the observed error rate for this set of scans.
+However, this is mainly due to an underestimation of the false negative error rate.
+As the problem mainly seems to lie in the estimation of the tail behavior, perhaps additional overdispersion corrections would help the model fit.
+Alternatively, forensic examiners will sometimes classify a cartridge case pair as "inconclusive," which is neither an "identification" (match) nor "exclusion" (non-match).
+Justification for an "inconclusive" is often that the two cartridge cases do not have distinctive markings to conclude that they are matching or non-matching.
+Perhaps somehow incorporating an "inconclusive" classification into the model would help the model fit.
+This would require some additional measure of "conclusivity" that has not yet been mathematically formalized.
+
+Note that this model only works for cartridge cases for which ground truth is known.
+As such, this model is currently more useful as a diagnostic tool for the CMC method rather than as a classification procedure.
+In the future, this model could be used in a score-based likelihood hypothesis testing procedure to determine the barrel of origin among a closed set.
+
+Future work:
+
+- Estimate score-based likelihood ratios using this model.
+
+- Compare INLA results to results obtained from MCMC (Stan, JAGS, etc.)
+
+- Fit a model that includes spatial components per comparison.
+
+- Incorporate an overdispersion correction or a mixture model framework (over different barrels) into the model to accommodate tail behavior.
+
+## References
+
+Havard Rue, Sara Martino, and Nicholas Chopin (2009), Approximate Bayesian Inference for Latent Gaussian Models Using Integrated Nested Laplace Approximations (with discussion), Journal of the Royal Statistical Society B, 71, 319-392.
+
+Finn Lindgren, Havard Rue (2015).  Bayesian Spatial Modelling with R-INLA.  Journal of Statistical Software, 63(19), 1-25.  URL http://www.jstatsoft.org/v63/i19/.
+
+J. Song. Proposed “NIST Ballistics Identification System (NBIS)” Based on 3D Topography Measurements on Correlation Cells. American Firearm and Tool Mark Examiners Journal, 45(2):11, 2013. URL https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=910868. 
+
+Zhang, N. F. (2019). The Use of Correlated Binomial Distribution in Estimating Error Rates for Firearm Evidence Identification. In Journal of Research of the National Institute of Standards and Technology (Vol. 124). National Institute of Standards and Technology (NIST). https://doi.org/10.6028/jres.124.026
+
+## Appendix: Figures
+
+```{r,echo=FALSE,cache=FALSE,fig.cap='\\label{fig:obsSimComparison_facet} The simulated CMC counts faceted by the barrel pairing. Vertical lines are drawn at the observed average CMC count for each barrel pairing.'}
+plt <- simulatedResults_modelz_entireFourBarrelsGFUR_initial%>%
+  mutate(refBarrelNew = ifelse(targBarrel == "G" & refBarrel %in% c("F","U","R"),"G",
+                               ifelse(targBarrel == "F" & refBarrel %in% c("U","R"),"F",
+                                      ifelse(targBarrel == "U" & refBarrel == "R","U",
+                                             refBarrel))),
+         targBarrelNew = ifelse(targBarrel == "G" & refBarrel %in% c("F","U","R"),refBarrel,
+                                ifelse(targBarrel == "F" & refBarrel %in% c("U","R"),refBarrel,
+                                       ifelse(targBarrel == "U" & refBarrel == "R",refBarrel,
+                                              targBarrel)))) %>%
+  # filter(refBarrel == "R") %>%
+  mutate(refBarrel = refBarrelNew,
+         targBarrel = targBarrelNew)  %>%
+  # arrange(refBarrel,targBarrel)  %>%
+  select(-c(refBarrelNew,targBarrelNew)) %>%
+  group_by(refBarrel,targBarrel,sampCount) %>%
+  tally()  %>%
+  group_by(refBarrel,targBarrel) %>%
+  mutate(dens = n/sum(n)) %>%
+  left_join(originalMethodCMCs_entireFourBarrels %>%
+              tidyr::separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+              dplyr::filter(reference != target) %>%
+              mutate(refBarrel = str_sub(reference,-2,-2),
+                     targBarrel = str_sub(target,-2,-2)) %>%
+              group_by(comparisonName,refBarrel,targBarrel) %>%
+              summarise(obsCount = sum(originalMethodClassif,na.rm = TRUE)) %>%
+              group_by(refBarrel,targBarrel) %>%
+              summarise(obsCount = mean(obsCount)),
+            by = c("refBarrel","targBarrel")) %>%
+  mutate(refBarrel = factor(refBarrel,levels = c("G","F","U","R"),labels = c("Barrel G","Barrel F","Barrel U","Barrel R")),
+         targBarrel = factor(targBarrel,levels = c("G","F","U","R"),labels = c("Barrel G","Barrel F","Barrel U","Barrel R"))) %>%
+  ggplot(aes(x = sampCount,y = dens)) +
+  geom_bar(stat = "identity",position = "identity") +
+  geom_vline(aes(xintercept = obsCount)) +
+  facet_grid(rows = vars(refBarrel),
+             cols = vars(targBarrel)) +
+  coord_cartesian(expand = FALSE,ylim = c(-.02,NA)) +
+  scale_fill_manual(values = c("#6a8de1","#E1BE6A"),aesthetics = c("fill","colour")) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+ggsave(filename = "images/inlaSimulation_faceted.png",plot = plt,width = 11/1.35,height = 8.5/1.35)
+
+im <- magick::image_read("images/inlaSimulation_faceted.png")
+
+magick::image_rotate(im,-90)
+```

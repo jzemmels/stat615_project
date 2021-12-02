@@ -1,0 +1,1289 @@
+---
+title: "R Notebook"
+output: pdf_document
+---
+
+Use a generalized linear mixed model with bernoulli likelihood and latent gaussian markov random field to model the CMC counts. 
+The latent (or intrinsic) gaussian markov random field addresses the spatial dependence betweeb cells. 
+The "mixed" part of the model addresses the fact that we observe multiple CMC counts from any one cartridge case (i.e., repeated measures).
+
+Let $i,j$ index $S$ scans, $i,j = 1,...,S$. 
+Denote a comparison between scan $i$ and scan $j$ as $i,j$.
+Let $\pmb{y}_{i,j} \in \{0,1\}^{N_{i,j}}$ be the vector of CMC results for the comaprison $i,j$ where $N_{i,j}$ is the total number of cells in comparison $i,j$.
+Identify a particular cell in comparison $i,j$ with its row/column index $[k,l]$, $k = 1,...,R_{i,j}$ and $l = 1,...,C_{i,j}$.
+Then let $y_{i,j,[k,l]} \in \pmb{y}_{i,j}$ be the CMC result for cell $[k,l]$ of comparison $i,j$.
+Assume $y_{i,j,[k,l]} | p_{i,j,[k,l]} \sim$ Bernoulli$(p_{i,j,[k,l]})$ where
+$$
+\text{logit}(p_{i,j,[k,l]}) = \alpha_0 + \alpha_i + \alpha_j + \gamma_{ij} + f_u(u_i) + f_u(u_j) + f_s(c_{[k,l]}).
+$$
+$\alpha_i, \alpha_j$ are fixed-effect parameters representing the effect of the barrels from which cartridge cases $i$ or $j$ originated (so $\alpha_i = \alpha_j$ if cartridge case $i$ and $j$ originated from the same barrel). 
+$\gamma_{ij}$ is the fixed-effect interaction between the barrels from which $i$ and $j$ originated.
+We assume that these have vague Gaussian priors with mean 0 (maybe?) and known precision (maybe?).
+
+*Possible alternative*: model fixed-effect terms with unknown mean/precision. Think more on how this can be interpreted.
+
+*Possible alternative:* model $\alpha_i, \alpha_j$ as cartridge case-level random effect terms and $f_u$ terms as additional random effects conditional on $\alpha_i$ (e.g., $f_u(u_i) | \alpha_i \sim N(\alpha_i,\tau_{i}^{-1})$ or perhaps a common $\tau$ precision).
+
+$f_u(u_i)$ and $f_u(u_j)$ are [u]nustructured random-effect parameters intended to account for the fact that we observe multiple CMC scores from scans $i$ and $j$ (repeated measures).
+Assume that $f_u(u_i)$ and $f_u(u_j)$ are conditionally independent and distributed $N(0,\tau_u^{-1})$ given precision $\tau_u$ for $i,j = 1,...,S$.
+These unstructured random terms thus behave as random intercepts.
+
+Finally, $f_s(s_{[k,l]})$ is a [s]patially structured term intended to account for spatial correlation between neighboring cells (or sites, hence the $s$).
+Assume that the sites $f_s(\pmb{s})$ follow a "Besag" distribution defined by
+$$
+f_s(s_{[k,l]}) | f_s(\pmb{s}_{-[k,l]}), \tau_s \sim N\left(\frac{1}{n_{[k,l]}} \sum_{[k,l] \sim [m,n]} f_s(s_{[m,n]}), \frac{1}{n_{[k,l]} \tau_s}\right)
+$$
+where $n_{[k,l]}$ is the number of neighbors of node $[k,l]$ and $[k,l] \sim [m,n]$ indicates that two nodes $[k,l]$ and $[m,n]$ are neighbors. We will assume a 3x3 neighborhood structure except for cells on the boundaries of the scan.
+
+*Possible alternative*: some other spatial model.
+
+The hyperparameters are then $\theta = (\tau_u, \tau_s)$ to which independent vague Gamma priors are assigned.
+
+*Possible extension:* If the neighborhood structure needs to be defined on a full 8x8 grid, then the cells containing too many NAs could be modeled as degeneratively non-CMCs (i.e., a non-CMC with probability 1). Could maybe an an indicator like $I(\text{% missing} \leq .85)$ to the PDF to accommodate this. May need to add an `+ ifelse(propMissing < .85,0,-Inf)` to model
+
+*Possible extension:* include a regression on the $T_x,T_y,T_{\theta},T_{CCF}$ thresholds used to declare CMCs/non-CMCs
+
+```{r setup}
+library(INLA)
+library(tidyverse)
+```
+
+```{r}
+calcVarianceRatio <- function(cmcData,similarityCol = "cmcCount"){
+  grand_similarityColAverage <- mean(unlist(cmcData[,similarityCol]))
+  
+  withinGroup_similarityCol <- cmcData %>%
+    group_by(type) %>%
+    summarise(similarityColAverage = mean(!!as.name(similarityCol)),
+              similarityColVar = var(!!as.name(similarityCol)),
+              .groups = "drop")
+  
+  betweenGroupVariability <- withinGroup_similarityCol %>%
+    mutate(similarityColSS = (similarityColAverage - grand_similarityColAverage)^2) %>%
+    pull(similarityColSS) %>%
+    sum()
+  
+  withinGroupVariability <- withinGroup_similarityCol %>%
+    pull(similarityColVar) %>%
+    sum()
+  
+  cmcData <- cmcData %>%
+    mutate(varRatio = betweenGroupVariability/withinGroupVariability)
+  
+  return(cmcData)
+}
+
+dat <- map_dfr(list.files("~/cmas/crossValidation/topMatch_randomTrain/topMatch_largerTrainSet_train_combinedCMCs/",full.names = TRUE),
+               ~ {
+                 
+                 load(.)
+                 
+                 return(combinedCMCs)
+                 
+               })
+
+dat %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel == targBarrel,"match","non-match")) %>%
+  group_by(xThresh,corrThresh) %>%
+  group_split() %>%
+  map_dfr(function(dat){
+    
+    calcVarianceRatio(dat,similarityCol = "originalMethod_refToTarget")
+    
+  }) %>%
+  dplyr::filter(varRatio == max(varRatio))
+
+dat %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel == targBarrel,"match","non-match")) %>%
+  group_by(xThresh,corrThresh) %>%
+  group_split() %>%
+  map_dfr(function(dat){
+    
+    calcVarianceRatio(dat,similarityCol = "originalMethod_targetToRef")
+    
+  }) %>%
+  dplyr::filter(varRatio == max(varRatio))
+```
+
+```{r}
+originalMethodCMCs %>%
+  group_by(comparisonName) %>%
+  summarise(originalMethod = sum(originalMethodClassif == "CMC",na.rm = TRUE)) %>%
+  arrange(comparisonName) %>%
+  separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel == targBarrel,"match","non-match")) %>%
+  ggplot(aes(x = originalMethod,y = ..density..,fill = type)) +
+  geom_histogram() +
+  facet_wrap(~ type,scales = "free")
+```
+
+
+```{r}
+scanNames <- list.files("~/cmas/crossValidation/topMatch_randomTrain/topMatch_largerTrainSet_train_CMCs/",full.names = TRUE)
+
+# future:::ClusterRegistry("stop")
+
+future::plan(future::multisession(workers = future::availableCores() - 6))
+
+originalMethodCMCs <-
+  furrr::future_map_dfr(scanNames,
+                        # map_dfr(scanNames,
+                        # c("~/cmas/crossValidation/topMatch_randomTrain/topMatchCMCs/K027jD1_vs_K027jD2.RData",
+                        #         "~/cmas/crossValidation/topMatch_randomTrain/topMatchCMCs/K027jD1_vs_K027jD3.RData",
+                        #         "~/cmas/crossValidation/topMatch_randomTrain/topMatchCMCs/K027jD1_vs_K027uB1.RData",
+                        #         "~/cmas/crossValidation/topMatch_randomTrain/topMatchCMCs/K027uB1_vs_K027uB2.RData"),
+                        function(fileName){
+                          
+                          load(fileName)
+                          
+                          # browser()
+                          
+                          originalMethodCMCs <- bind_rows(CMCs %>%
+                                                            dplyr::filter(xThresh == 25 & 
+                                                                            corrThresh > .29 & corrThresh < .31) %>%
+                                                            dplyr::filter(originalMethodClassif == "CMC" & direction == "refToTarget") %>%
+                                                            dplyr::select(cellIndex,originalMethodClassif,comparisonName),
+                                                          CMCs %>%
+                                                            dplyr::filter(xThresh == 25 & 
+                                                                            corrThresh > .29 & corrThresh < .31) %>%
+                                                            dplyr::filter(originalMethodClassif == "CMC" & direction == "targetToRef") %>%
+                                                            dplyr::select(cellIndex,originalMethodClassif,comparisonName)) %>%
+                            distinct()
+                          
+                          originalMethodCMCs <- bind_rows(originalMethodCMCs %>%
+                                                            arrange(comparisonName),
+                                                          CMCs %>%
+                                                            dplyr::select(cellIndex,comparisonName) %>%
+                                                            distinct() %>%
+                                                            anti_join(originalMethodCMCs %>%
+                                                                        dplyr::select(-c(originalMethodClassif,originalMethodClassif)),
+                                                                      by = c("cellIndex","comparisonName")) %>%
+                                                            mutate(originalMethodClassif = "non-CMC")) %>%
+                            tidyr::separate(col = cellIndex,sep = ", ",into = c("rowInd","colInd"),remove = FALSE) %>%
+                            arrange(comparisonName,cellIndex) %>%
+                            mutate(rowInd = as.numeric(rowInd),
+                                   colInd = as.numeric(colInd))
+                          
+                          originalMethodCMCs_grid <- expand.grid(colInd = 1:8,rowInd = 1:8) %>%
+                            mutate(cellID = 1:64)
+                          
+                          originalMethodCMCs <- originalMethodCMCs %>%
+                            left_join(originalMethodCMCs_grid,
+                                      by = c("rowInd","colInd"))
+                          
+                          bind_rows(originalMethodCMCs,
+                                    originalMethodCMCs_grid %>%
+                                      anti_join(originalMethodCMCs,
+                                                by = c("rowInd","colInd")) %>%
+                                      mutate(cellIndex = paste0(rowInd,", ",colInd),
+                                             originalMethodClassif = NA,
+                                             comparisonName = unique(originalMethodCMCs$comparisonName))) %>%
+                            distinct() %>%
+                            arrange(cellIndex)
+                          
+                        })
+
+# save(originalMethodCMCs,file = "originalMethodCMCs.RData")
+
+load("originalMethodCMCs.RData")
+
+originalMethodCMCs_full <- originalMethodCMCs %>%
+  dplyr::select(cellID,originalMethodClassif,comparisonName) %>%
+  mutate(originalMethodClassif = unlist(ifelse(originalMethodClassif == "CMC",1,0)),
+         cellID = unlist(cellID)) %>%
+  as.data.frame() %>%
+  # arrange(comparisonName,cellID) %>%
+  tidyr::separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel == targBarrel,"match","non-match"))
+
+set.seed(1152021)
+
+selectedBarrels <- unique(c(originalMethodCMCs_full$refBarrel,originalMethodCMCs_full$targBarrel))[sample(1:10,size = 5,replace = FALSE)]
+
+originalMethodCMCs_subset <- originalMethodCMCs_full %>%
+  filter(refBarrel %in% selectedBarrels & targBarrel %in% selectedBarrels)
+
+selectedScanNames <- data.frame(scan = unique(c(originalMethodCMCs_subset$reference,originalMethodCMCs_subset$target))) %>%
+  mutate(barrel = str_sub(scan,-2,-2)) %>%
+  # arrange(barrel)
+  group_by(barrel) %>%
+  group_split() %>%
+  map_dfr(function(dat){
+    
+    # dat
+    
+    data.frame(scan = dat$scan[sample(1:nrow(dat),size = 6,replace = FALSE)])
+    
+  }) %>%
+  pull(scan)
+
+originalMethodCMCs_mini <- originalMethodCMCs_full %>%
+  dplyr::filter(reference %in% selectedScanNames & target %in% selectedScanNames)
+
+originalMethodCMCs_mini %>%
+  group_by(comparisonName,type) %>%
+  summarise(originalMethod = sum(originalMethodClassif,na.rm = TRUE)) %>%
+  ggplot(aes(x = originalMethod,fill = type)) +
+  geom_histogram() +
+  facet_wrap(~ type,scales = "free")
+
+scanIndicator <- map_dfc(unique(c(originalMethodCMCs_mini$reference,originalMethodCMCs_mini$target)),
+                         function(scan){
+                           
+                           originalMethodCMCs_mini %>%
+                             mutate(scan = ifelse(reference == scan | target == scan,1,0)) %>%
+                             dplyr::select(scan) %>%
+                             set_names(scan)
+                           
+                         })
+
+barrelIndicator <- map_dfc(unique(c(originalMethodCMCs_mini$refBarrel,originalMethodCMCs_mini$targBarrel)),
+                           function(barrel){
+                             
+                             originalMethodCMCs_mini %>%
+                               mutate(ret = ifelse(refBarrel == barrel & targBarrel == barrel,2,
+                                                   ifelse(refBarrel == barrel | targBarrel == barrel,1,0))) %>%
+                               dplyr::select(ret) %>%
+                               set_names(paste0(barrel))
+                             
+                             # originalMethodCMCs_mini %>%
+                             #   mutate(ref = ifelse(refBarrel == barrel,1,0),
+                             #          targ = ifelse(targBarrel == barrel,1,0)) %>%
+                             #   dplyr::select(ref,targ) %>%
+                             #   set_names(paste0("ref_",barrel),paste0("targ_",barrel))
+                             
+                           })
+```
+
+
+```{r}
+originalMethodCMCs_grid <- expand.grid(colInd = 1:8,rowInd = 1:8) %>%
+  mutate(cellID = 1:64)
+
+adjacent <- matrix(0,nrow = nrow(originalMethodCMCs_grid),ncol = nrow(originalMethodCMCs_grid))
+
+for(ind in 1:nrow(originalMethodCMCs_grid)){
+  
+  #determine cells that are adjacent (including diagonal) with the cell of interest
+  dat <- originalMethodCMCs_grid %>%
+    dplyr::filter((abs(rowInd - originalMethodCMCs_grid[ind,]$rowInd) == 1 & abs(colInd - originalMethodCMCs_grid[ind,]$colInd) == 0) | 
+                    (abs(rowInd - originalMethodCMCs_grid[ind,]$rowInd) == 0 & abs(colInd - originalMethodCMCs_grid[ind,]$colInd) == 1) |
+                    ((abs(rowInd - originalMethodCMCs_grid[ind,]$rowInd) == 1 & abs(colInd - originalMethodCMCs_grid[ind,]$colInd) == 1)))
+  
+  #update adjacency matrix to define an edge between adjacent cells
+  for(i in 1:nrow(dat)){
+    
+    adjacent[originalMethodCMCs_grid[ind,]$cellID,dat[i,]$cellID] <- 1
+    adjacent[dat[i,]$cellID,originalMethodCMCs_grid[ind,]$cellID] <- 1
+    
+  }
+  
+}
+
+g = inla.read.graph(adjacent)
+
+plot(g)
+```
+
+TODO:
+- Include interaction effect in linear predictor
+
+- Compare different model fits with/without certain terms
+
+- Think more about fitting barrel as a fixed or random effect -- I feel like it *should* be random (treated as a random block effect instead of fixed block effect), but then need to think more on what the interpretation will be AND how to actually implement it since the design matrix is linearly dependent on the scan-level design matrix
+-- Figure out how to interpret random effect estimates (is the mean the average variance or is it an estimated posterior mean?)
+
+- Determine whether the model is fit well (e.g., the precision of cellID is small => variance is large, but is this a bad thing or is it expected?)
+
+- Generate samples from posterior. Use these to simulate CMC counts and compare to observed data and use to calculate likelihood ratios more effectively.
+-- Compare simulated data sets if barrel is treated as fixed vs. random. Maybe it doesn't matter
+
+- Compare to other packages (rstan, rjags, glmmfields, etc.)
+
+Look more into hierarchical random effects model.
+The barrel-level indicator matrix is linearly dependent on the scan-level matrix.
+
+THIS DOESN'T WORK:
+Make the barrel a fixed effect and set the design matrix using `control.predictor`
+Create a factor vector of the barrel names and explicitly reference that in the formula. 
+Then, set the `A` argument in `control.predictor` to the barrelIndicator matrix. 
+Hopefully the formula won't throw an error even though the factor vector isn't of the same length as the data, but A*vec is
+
+The formula did throw an error, so the call above treats the refBarrel and targBarrel columns separately - which doesn't really make sense.
+
+1. The last $p$ rows of the summary.random data frame gives the results for the actual $p$ parameters.
+2. For some reason, treating barrel as fixed yields very different estimates that setting them as random effects. Perhaps the random effects are still not being specified correctly.
+3. I should look into this idea of "stacking" -- e.g., inla.stack -- as this seems to combine a model matrix (presumable fixed effects) with a random effects matrix. [This tutorial](https://ourcodingclub.github.io/tutorials/inla/) seems to explain stacking fairly well. Perhaps one can define a matrix of random effects (e.g., barrel random effects) similar to how the tutorial adds the model matrix.
+-- Alternatively, perhaps I'm misunderstanding how the random effects relative to the fixed effects are fit. Maybe look at the 510 notes to see differences there? I figure that the mean of the two should match up
+4. *Maybe* check to see if the fixed effects from inlaFit saved above add together to yield the mean of the random effects in inlaFit_test?
+
+
+```{r}
+# inlaFit_iid <- INLA::inla(formula = originalMethodClassif ~ f(cellID,model = "iid"),
+#            family = "binomial",
+#            Ntrials = 1,
+#            data = originalMethodCMCs_mini,
+#            control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE))
+
+
+inlaFit_initial <- INLA::inla(formula = originalMethodClassif ~ 
+                                refBarrel + targBarrel +
+                                f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+                                # f(barrelID,model = "z",Z = as.matrix(barrelIndicator),constr = TRUE) +
+                                f(cellID,model = "besag",graph = g),
+                              family = "binomial",
+                              Ntrials = 1,
+                              data = originalMethodCMCs_mini %>%
+                                dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+                                mutate(refBarrel = factor(refBarrel),
+                                       targBarrel = factor(targBarrel)) %>%
+                                mutate(scanID = rep(1:(nrow(.)/64),each = 64)),
+                              control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE),
+                              verbose = TRUE
+                              # ,control.predictor = list(A = as.matrix(barrelIndicator))
+                              ,control.inla = list(diagonal = 10,strategy = "gaussian",int.strategy = "eb")
+)
+
+inlaFit <- INLA::inla(formula = originalMethodClassif ~ 
+                        refBarrel + targBarrel +
+                        f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+                        # f(barrelID,model = "z",Z = as.matrix(barrelIndicator),constr = TRUE) +
+                        f(cellID,model = "besag",graph = g),
+                      family = "binomial",
+                      Ntrials = 1,
+                      data = originalMethodCMCs_mini %>%
+                        dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+                        mutate(refBarrel = factor(refBarrel),
+                               targBarrel = factor(targBarrel)) %>%
+                        mutate(scanID = rep(1:(nrow(.)/64),each = 64)),
+                      control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE,config = TRUE),
+                      control.mode = list(result = inlaFit_initial,restart = TRUE),
+                      verbose = TRUE
+                      # ,control.predictor = list(A = as.matrix(barrelIndicator))
+                      # ,control.inla = list(diagonal = 10)
+)
+
+save(inlaFit,file = "inlaFit.RData")
+
+# summary(inlaFit_iid)
+summary(inlaFit)
+
+inlaFit$summary.random
+
+originalMethodCMCs_grid %>%
+  left_join(inlaFit$summary.random$cellID %>%
+              dplyr::select(ID,mode),
+            by = c("cellID" = "ID")) %>%
+  ggplot(aes(x = colInd,y = rowInd)) +
+  geom_tile(aes(fill = mode)) +
+  scale_fill_gradient2(low = "purple",high = "orange") +
+  theme_bw() +
+  coord_fixed(expand = FALSE) +
+  scale_y_reverse()
+```
+
+
+```{r}
+INLAutils::plot_fixed_marginals(inlaFit,priors = TRUE)
+
+INLAutils::plot_hyper_marginals(inlaFit)
+
+plt <- INLAutils::plot_marginals_fitted(inlaFit)
+
+plt
+
+plt$data %>%
+  filter(plot == "Fitted Values") %>%
+  filter(mean > 0) %>%
+  ggplot(aes(x = ID,y = mean)) +
+  geom_line()
+
+INLAutils::plot_random_effects(inlaFit,type = "line")
+```
+
+```{r}
+# some summary statistics
+-1*sum(log(inlaFit$cpo$cpo),na.rm = TRUE)
+
+data.frame(x = inlaFit$cpo) %>%
+  mutate(ind = 1:nrow(.)) %>%
+  ggplot(aes(x = ind,y = x.cpo)) +
+  geom_line()
+
+data.frame(x = inlaFit$cpo) %>%
+  mutate(ind = 1:nrow(.),
+         # 2.4.3 of INLA gitbook for discrete data
+         pitAdj = x.pit - .5*x.cpo) %>%
+  ggplot(aes(x = ind,y = pitAdj)) +
+  geom_line()
+
+inlaFit$dic$dic
+```
+
+```{r}
+# samples parameters from posterior
+postSample <- INLA::inla.posterior.sample(n = 1,result = inlaFit)
+
+# combines sampled parameter above into linear predictor
+postPredictor <- INLA::inla.posterior.sample.eval(fun = "Predictor",samples = postSample)
+
+# inverse link transforms linear predictor back to probability
+sampleProbs <- exp(postPredictor)/(1 + exp(postPredictor))
+```
+
+
+
+```{r}
+originalMethodCMCs_cellInds <- originalMethodCMCs %>%
+  dplyr::select(cellID,rowInd,colInd,originalMethodClassif,comparisonName) %>%
+  tidyr::separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel == targBarrel,"match","non-match")) %>%
+  mutate(originalMethodClassif = unlist(ifelse(originalMethodClassif == "CMC",1,0)),
+         cellID = unlist(cellID)) %>%
+  as.data.frame() %>%
+  # dplyr::filter(type == "match") %>%
+  dplyr::filter(reference %in% selectedScanNames & target %in% selectedScanNames) %>%
+  left_join(originalMethodCMCs_mini %>%
+              mutate(postPred = inlaFit$marginals.fitted.values) %>%
+              mutate(type = ifelse(refBarrel == targBarrel,"match","non-match"),
+                     comparisonName = paste0(reference,"_vs_",target)) %>%
+              dplyr::select(cellID,comparisonName,postPred) %>%
+              tidyr::separate(col = comparisonName,into = c("ref","targ"),sep = "_vs_") %>%
+              mutate(comparisonName = paste0(ref," vs. ",targ)) %>%
+              dplyr::select(-c(ref,targ)),
+            by = c("cellID","comparisonName")) %>%
+  dplyr::filter(comparisonName %in% unique(comparisonName)[1:30])
+
+originalMethodCMCs_cellInds %>%
+  # slice(1) %>%
+  pmap_dfr(~ {
+    
+    return(data.frame(rowInd = ..2,
+                      colInd = ..3,
+                      originalMethodClassif = ..4,
+                      comparisonName = ..5,
+                      type = ..10,
+                      modeVal = ..11[,1][which.max(..11[,2])]) %>%
+             mutate(modeVal = ifelse(is.na(originalMethodClassif),NA,modeVal)))
+    
+  }) %>%
+  mutate(originalMethodClassif = factor(originalMethodClassif)) %>%
+  group_by(comparisonName) %>%
+  group_split() %>%
+  map(function(dat){
+    
+    ggplot(data = dat,aes(x = rowInd,y = colInd,fill = modeVal)) +
+      geom_tile() +
+      geom_text(aes(label = round(modeVal,2),colour = originalMethodClassif)) +
+      theme_bw() +
+      coord_fixed(expand = FALSE) +
+      labs(title = unique(dat$comparisonName)) +
+      scale_fill_gradient(low = "white",high = "orange") +
+      scale_colour_manual(values = c("black","red","gray50")) +
+      scale_y_reverse()
+    
+  })
+```
+
+
+
+
+
+
+```{r}
+originalMethodCMCs_mini %>%
+  mutate(postPred = inlaFit$marginals.fitted.values) %>%
+  mutate(type = ifelse(refBarrel == targBarrel,"match","non-match"),
+         comparisonName = paste0(reference,"_vs_",target)) %>%
+  dplyr::filter(comparisonName %in% unique(comparisonName)[1:20])  %>%
+  group_by(comparisonName) %>%
+  group_split() %>%
+  map(function(dat){
+    
+    ret <- pmap_dfr(dat,
+                    ~ {
+                      
+                      # ..7
+                      
+                      mutate(as.data.frame(..9),
+                             classif = ..2,
+                             cellID = ..1)
+                      
+                    })
+    
+    ret %>%
+      dplyr::filter(!is.na(classif)) %>%
+      mutate(classif = as.character(classif)) %>%
+      mutate(classif = ifelse(is.na(classif),"NA",classif)) %>%
+      ggplot(aes(x = x,y = y)) +
+      geom_line() +
+      geom_text(aes(label = classif),x = .01,y = 45,check_overlap = TRUE) +
+      facet_wrap(~ cellID,scales = "free") +
+      labs(title = paste0(unique(dat$comparisonName),", ",unique(dat$type))) +
+      xlim(c(0,.5))
+    
+    
+  })
+
+originalMethodCMCs_mini %>%
+  mutate(postPred = inlaFit$marginals.fitted.values) %>%
+  mutate(type = ifelse(refBarrel == targBarrel,"match","non-match"),
+         comparisonName = paste0(reference,"_vs_",target)) %>%
+  dplyr::filter(type == "match") %>%
+  # dplyr::filter(comparisonName %in% unique(comparisonName)[1:20]) %>%
+  group_by(comparisonName) %>%
+  group_split() %>%
+  map_dfr(function(dat){
+    
+    ret <- pmap_dfr(dat,
+                    ~ {
+                      
+                      # ..7
+                      
+                      mutate(as.data.frame(..9),
+                             classif = ..2,
+                             cellID = paste0(..3,"_",..1),
+                             comparisonName = ..3)
+                      
+                    })
+    
+    return(ret)
+    
+  }) %>%
+  dplyr::filter(!is.na(classif)) %>%
+  mutate(classif = as.factor(classif)) %>%
+  group_by(comparisonName) %>%
+  group_split() %>%
+  map(function(dat){
+    
+    ggplot(data = dat,aes(x = x,y = y,colour = classif,group = cellID)) +
+      geom_line() +
+      facet_wrap(~ classif,ncol = 1) +
+      labs(title = unique(dat$comparisonName))
+    
+  })
+```
+
+
+```{r}
+load("inlaFit.RData")
+```
+
+```{r}
+inlaFit_barrelFixed_initial <- 
+  INLA::inla(formula = originalMethodClassif ~ 
+               -1 + 
+               barrelG + barrelC + barrelA + barrelZ + barrelR +
+               # -1 + refBarrel + targBarrel +
+               f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+               # f(barrelID,model = "z",Z = as.matrix(barrelIndicator)) +
+               f(cellID,model = "besag",graph = g),
+             family = "binomial",
+             Ntrials = 1,
+             data = originalMethodCMCs_mini %>%
+               dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+               mutate(refBarrel = factor(refBarrel),
+                      targBarrel = factor(targBarrel)) %>%
+               mutate(scanID = rep(1:(nrow(.)/64),each = 64),
+                      barrelID = rep(1:(nrow(.)/64),each = 64)) %>%
+               bind_cols(barrelIndicator %>%
+                           set_names(paste0("barrel",names(barrelIndicator)))),
+             control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE),
+             verbose = TRUE
+             # ,control.predictor = list(A = as.matrix(barrelIndicator))
+             ,control.inla = list(diagonal = 10,strategy = "gaussian",int.strategy = "eb")
+  )
+
+inlaFit_barrelFixed <- INLA::inla(formula = originalMethodClassif ~ 
+                                    -1 + 
+                                    barrelG + barrelC + barrelA + barrelZ + barrelR +
+                                    # -1 + refBarrel + targBarrel +
+                                    f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+                                    # f(barrelID,model = "z",Z = as.matrix(barrelIndicator)) +
+                                    f(cellID,model = "besag",graph = g),
+                                  family = "binomial",
+                                  Ntrials = 1,
+                                  data = originalMethodCMCs_mini %>%
+                                    dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+                                    mutate(refBarrel = factor(refBarrel),
+                                           targBarrel = factor(targBarrel)) %>%
+                                    mutate(scanID = rep(1:(nrow(.)/64),each = 64),
+                                           barrelID = rep(1:(nrow(.)/64),each = 64)) %>%
+                                    bind_cols(barrelIndicator %>%
+                                                set_names(paste0("barrel",names(barrelIndicator)))),
+                                  control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE,config = TRUE),
+                                  control.mode = list(result = inlaFit_barrelFixed_initial,restart = TRUE)
+                                  # ,verbose = TRUE
+                                  # ,control.predictor = list(A = as.matrix(barrelIndicator))
+                                  # ,control.inla = list(diagonal = 10)
+)
+
+save(inlaFit_barrelFixed,file = "inlaFit_barrelFixed.RData")
+
+summary(inlaFit_barrelFixed)
+```
+
+```{r}
+inlaFit_test$summary.random
+```
+
+```{r}
+originalMethodCMCs_grid %>%
+  left_join(inlaFit_test$summary.random$cellID %>%
+              dplyr::select(ID,mode),
+            by = c("cellID" = "ID")) %>%
+  ggplot(aes(x = colInd,y = rowInd)) +
+  geom_tile(aes(fill = mode)) +
+  scale_fill_gradient2(low = "purple",high = "orange") +
+  theme_bw() +
+  coord_fixed(expand = FALSE) +
+  scale_y_reverse()
+```
+
+
+```{r}
+INLAutils::plot_fixed_marginals(inlaFit_test,priors = TRUE) 
+
+INLAutils::plot_hyper_marginals(inlaFit_test)
+
+plt <- INLAutils::plot_marginals_fitted(inlaFit_test)
+
+plt
+
+plt$data %>%
+  filter(plot == "Fitted Values") %>%
+  filter(mean > 0) %>%
+  ggplot(aes(x = ID,y = mean)) +
+  geom_line()
+
+INLAutils::plot_random_effects(inlaFit_test,type = "line")
+```
+
+```{r}
+inlaFit_test$marginals.fixed %>%
+  map2_dfr(names(.),
+           ~ {
+             
+             data.frame(.x) %>%
+               mutate(barrel = .y)
+             
+           }) %>%
+  ggplot(aes(x = x,y = y,colour = barrel)) +
+  geom_line()
+```
+
+```{r}
+# tells a similar story to the posterior estimated densities given above
+originalMethodCMCs_mini %>%
+  mutate(postMean = inlaFit_test$summary.fitted.values %>%
+           pull(mean)) %>%
+  filter(!is.na(originalMethodClassif)) %>%
+  arrange(targBarrel) %>%
+  mutate(barrels = paste0(refBarrel,targBarrel),
+         rowID = 1:nrow(.)) %>%
+  ggplot(aes(x=rowID,y=postMean,colour=targBarrel)) +
+  geom_point() +
+  # theme(legend.position = "none")
+  theme_bw()
+```
+
+```{r}
+repData <- originalMethodCMCs_mini %>%
+  select(comparisonName,originalMethodClassif,type)
+
+simulatedResults <- map_dfr(1:10,
+                            function(rep){
+                              
+                              # samples parameters from posterior
+                              postSample <- INLA::inla.posterior.sample(n = 1,result = inlaFit_test)
+                              
+                              # combines sampled parameter above into linear predictor
+                              postPredictor <- INLA::inla.posterior.sample.eval(fun = "Predictor",samples = postSample)
+                              
+                              # inverse link transforms linear predictor back to probability
+                              sampleProbs <- exp(postPredictor)/(1 + exp(postPredictor))
+                              
+                              map_dfr(1:100,
+                                      function(rep2){
+                                        
+                                        repData %>%
+                                          mutate(sampleProb = c(sampleProbs),
+                                                 samp = map_dbl(sampleProb,~ rbinom(n = 1,size = 1,prob = .))) %>%
+                                          mutate(samp = ifelse(is.na(originalMethodClassif),NA,samp)) %>%
+                                          group_by(comparisonName,type) %>%
+                                          summarise(sampCount = sum(samp,na.rm = TRUE),.groups = "drop") %>%
+                                          mutate(postRep = rep,
+                                                 obsRep = rep2)
+                                      })
+                              
+                            })
+
+simulatedResults <- simulatedResults %>%
+  tidyr::separate(col = comparisonName,sep = " vs. ",into = c("reference","target"),remove = FALSE) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2))
+
+simulatedResults %>%
+  ggplot(aes(x = sampCount,y = ..density..,fill = type)) +
+  geom_histogram() +
+  facet_wrap(refBarrel ~ targBarrel)
+```
+
+
+
+```{r}
+originalMethodCMCs_mini %>% 
+  group_by(comparisonName) %>%
+  summarise(originalMethod = sum(originalMethodClassif,na.rm = TRUE)) %>%
+  arrange(comparisonName) %>%
+  separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel == targBarrel,"match","non-match")) %>%
+  # dplyr::filter(type == "match") %>%
+  ggplot(aes(x = originalMethod,y = ..density..,fill = type)) +
+  geom_histogram() +
+  facet_wrap(~ type,scales = "free") +
+  facet_wrap(refBarrel ~ targBarrel)
+```
+
+
+Fit the model where barrel is treated as random
+
+```{r}
+inlaFit_barrelRandom_initial <- 
+  INLA::inla(formula = originalMethodClassif ~ 
+               # -1 + 
+               # barrelG + barrelC + barrelA + barrelZ + barrelR +
+               # -1 + refBarrel + targBarrel +
+               f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+               f(barrelID,model = "z",Z = as.matrix(barrelIndicator)) +
+               f(cellID,model = "besag",graph = g),
+             family = "binomial",
+             Ntrials = 1,
+             data = originalMethodCMCs_mini %>%
+               dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+               mutate(refBarrel = factor(refBarrel),
+                      targBarrel = factor(targBarrel)) %>%
+               mutate(scanID = rep(1:(nrow(.)/64),each = 64),
+                      barrelID = rep(1:(nrow(.)/64),each = 64)) %>%
+               bind_cols(barrelIndicator %>%
+                           set_names(paste0("barrel",names(barrelIndicator)))),
+             control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE),
+             verbose = TRUE
+             # ,control.predictor = list(A = as.matrix(barrelIndicator))
+             ,control.inla = list(diagonal = 10,strategy = "gaussian",int.strategy = "eb")
+  )
+
+inlaFit_barrelRandom <- INLA::inla(formula = originalMethodClassif ~ 
+                                     # -1 + 
+                                     # barrelG + barrelC + barrelA + barrelZ + barrelR +
+                                     # -1 + refBarrel + targBarrel +
+                                     f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+                                     f(barrelID,model = "z",Z = as.matrix(barrelIndicator)) +
+                                     f(cellID,model = "besag",graph = g),
+                                   family = "binomial",
+                                   Ntrials = 1,
+                                   data = originalMethodCMCs_mini %>%
+                                     dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+                                     mutate(refBarrel = factor(refBarrel),
+                                            targBarrel = factor(targBarrel)) %>%
+                                     mutate(scanID = rep(1:(nrow(.)/64),each = 64),
+                                            barrelID = rep(1:(nrow(.)/64),each = 64)) %>%
+                                     bind_cols(barrelIndicator %>%
+                                                 set_names(paste0("barrel",names(barrelIndicator)))),
+                                   control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE,config = TRUE),
+                                   control.mode = list(result = inlaFit_barrelRandom_initial,restart = TRUE),
+                                   verbose = TRUE
+                                   # ,control.predictor = list(A = as.matrix(barrelIndicator))
+                                   # ,control.inla = list(diagonal = 10)
+)
+
+save(inlaFit_barrelRandom,file = "inlaFit_barrelRandom.RData")
+
+summary(inlaFit_barrelRandom)
+```
+
+```{r}
+INLAutils::plot_fixed_marginals(inlaFit_barrelRandom,priors = TRUE) 
+
+INLAutils::plot_hyper_marginals(inlaFit_barrelRandom)
+
+plt <- INLAutils::plot_marginals_fitted(inlaFit_barrelRandom)
+
+plt
+
+plt$data %>%
+  filter(plot == "Fitted Values") %>%
+  filter(mean > 0) %>%
+  ggplot(aes(x = ID,y = mean)) +
+  geom_point()
+
+INLAutils::plot_random_effects(inlaFit_barrelRandom,type = "line")
+```
+
+```{r}
+inlaFit_barrelRandom$summary.fitted.values %>%
+  mutate(rowid = 1:nrow(.)) %>%
+  filter(mean > 0) %>%
+  ggplot(aes(x = rowid,y = mean)) +
+  geom_point()
+```
+
+
+```{r}
+originalMethodCMCs_mini %>%
+  mutate(postMean = inlaFit_barrelRandom$summary.fitted.values %>%
+           pull(mean)) %>%
+  filter(!is.na(originalMethodClassif)) %>%
+  arrange(targBarrel) %>%
+  mutate(barrels = paste0(refBarrel,targBarrel),
+         rowID = 1:nrow(.)) %>%
+  ggplot(aes(x=rowID,y=postMean,colour=targBarrel)) +
+  geom_point() +
+  # theme(legend.position = "none")
+  theme_bw()
+```
+
+```{r}
+repData <- originalMethodCMCs_mini %>%
+  select(comparisonName,originalMethodClassif,type)
+
+simulatedResults <- map_dfr(1:1000,
+                            function(rep){
+                              
+                              # samples parameters from posterior
+                              postSample <- INLA::inla.posterior.sample(n = 1,result = inlaFit_barrelRandom)
+                              
+                              # combines sampled parameter above into linear predictor
+                              postPredictor <- INLA::inla.posterior.sample.eval(fun = "Predictor",samples = postSample)
+                              
+                              # inverse link transforms linear predictor back to probability
+                              sampleProbs <- exp(postPredictor)/(1 + exp(postPredictor))
+                              
+                              repData %>%
+                                mutate(sampleProb = c(sampleProbs),
+                                       samp = map_dbl(sampleProb,~ rbinom(n = 1,size = 1,prob = .))) %>%
+                                mutate(samp = ifelse(is.na(originalMethodClassif),NA,samp)) %>%
+                                group_by(comparisonName,type) %>%
+                                summarise(sampCount = sum(samp,na.rm = TRUE),.groups = "drop") %>%
+                                mutate(postRep = rep)
+                              
+                            })
+
+simulatedResults <- simulatedResults %>%
+  tidyr::separate(col = comparisonName,sep = " vs. ",into = c("reference","target"),remove = FALSE) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2))
+
+simulatedResults %>%
+  ggplot(aes(x = sampCount,y = ..density..,fill = type)) +
+  geom_histogram() +
+  facet_wrap(refBarrel ~ targBarrel)
+```
+
+
+Treat barrel as fixed and include interaction term between barrels
+
+
+```{r}
+inlaFit_barrelFixedInteraction_initial <- 
+  INLA::inla(formula = originalMethodClassif ~ 
+               -1 + 
+               (barrelG + barrelC + barrelA + barrelZ + barrelR)^2 +
+               # -1 + refBarrel + targBarrel +
+               f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+               # f(barrelID,model = "z",Z = as.matrix(barrelIndicator)) +
+               f(cellID,model = "besag",graph = g),
+             family = "binomial",
+             Ntrials = 1,
+             data = originalMethodCMCs_mini %>%
+               dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+               mutate(refBarrel = factor(refBarrel),
+                      targBarrel = factor(targBarrel)) %>%
+               mutate(scanID = rep(1:(nrow(.)/64),each = 64),
+                      barrelID = rep(1:(nrow(.)/64),each = 64)) %>%
+               bind_cols(barrelIndicator %>%
+                           set_names(paste0("barrel",names(barrelIndicator)))),
+             control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE),
+             verbose = TRUE
+             # ,control.predictor = list(A = as.matrix(barrelIndicator))
+             ,control.inla = list(diagonal = 10,strategy = "gaussian",int.strategy = "eb")
+  )
+
+inlaFit_barrelFixedInteraction <- INLA::inla(formula = originalMethodClassif ~ 
+                                               -1 + 
+                                               (barrelG + barrelC + barrelA + barrelZ + barrelR)^2 +
+                                               # -1 + refBarrel + targBarrel +
+                                               f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+                                               # f(barrelID,model = "z",Z = as.matrix(barrelIndicator)) +
+                                               f(cellID,model = "besag",graph = g),
+                                             family = "binomial",
+                                             Ntrials = 1,
+                                             data = originalMethodCMCs_mini %>%
+                                               dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+                                               mutate(refBarrel = factor(refBarrel),
+                                                      targBarrel = factor(targBarrel)) %>%
+                                               mutate(scanID = rep(1:(nrow(.)/64),each = 64),
+                                                      barrelID = rep(1:(nrow(.)/64),each = 64)) %>%
+                                               bind_cols(barrelIndicator %>%
+                                                           set_names(paste0("barrel",names(barrelIndicator)))),
+                                             control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE,config = TRUE),
+                                             control.mode = list(result = inlaFit_barrelFixedInteraction_initial,restart = TRUE),
+                                             verbose = TRUE
+                                             # ,control.predictor = list(A = as.matrix(barrelIndicator))
+                                             # ,control.inla = list(diagonal = 10)
+)
+
+save(inlaFit_barrelFixedInteraction,file = "inlaFit_barrelFixedInteraction.RData")
+
+summary(inlaFit_barrelFixedInteraction)
+```
+
+```{r}
+INLAutils::plot_fixed_marginals(inlaFit_barrelFixedInteraction,priors = TRUE) 
+
+INLAutils::plot_hyper_marginals(inlaFit_barrelFixedInteraction)
+
+plt <- INLAutils::plot_marginals_fitted(inlaFit_barrelFixedInteraction)
+
+plt
+
+plt$data %>%
+  filter(plot == "Fitted Values") %>%
+  filter(mean > 0) %>%
+  ggplot(aes(x = ID,y = mean)) +
+  geom_point()
+
+INLAutils::plot_random_effects(inlaFit_barrelFixedInteraction,type = "line")
+```
+
+```{r}
+inlaFit_barrelFixedInteraction$summary.fitted.values %>%
+  mutate(rowid = 1:nrow(.)) %>%
+  filter(mean > 0) %>%
+  ggplot(aes(x = rowid,y = mean)) +
+  geom_point()
+```
+
+
+```{r}
+originalMethodCMCs_mini %>%
+  mutate(postMean = inlaFit_barrelFixedInteraction$summary.fitted.values %>%
+           pull(mean)) %>%
+  filter(!is.na(originalMethodClassif)) %>%
+  arrange(targBarrel) %>%
+  mutate(barrels = paste0(refBarrel,targBarrel),
+         rowID = 1:nrow(.)) %>%
+  ggplot(aes(x=rowID,y=postMean,colour=targBarrel)) +
+  geom_point() +
+  # theme(legend.position = "none")
+  theme_bw()
+```
+
+```{r}
+repData <- originalMethodCMCs_mini %>%
+  select(comparisonName,originalMethodClassif,type)
+
+simulatedResults <- map_dfr(1:100,
+                            function(rep){
+                              
+                              # samples parameters from posterior
+                              postSample <- INLA::inla.posterior.sample(n = 1,result = inlaFit_barrelFixedInteraction)
+                              
+                              # combines sampled parameter above into linear predictor
+                              postPredictor <- INLA::inla.posterior.sample.eval(fun = "Predictor",samples = postSample)
+                              
+                              # inverse link transforms linear predictor back to probability
+                              sampleProbs <- exp(postPredictor)/(1 + exp(postPredictor))
+                              
+                              repData %>%
+                                mutate(sampleProb = c(sampleProbs),
+                                       samp = map_dbl(sampleProb,~ rbinom(n = 1,size = 1,prob = .))) %>%
+                                mutate(samp = ifelse(is.na(originalMethodClassif),NA,samp)) %>%
+                                group_by(comparisonName,type) %>%
+                                summarise(sampCount = sum(samp,na.rm = TRUE),.groups = "drop") %>%
+                                mutate(postRep = rep)
+                              
+                            })
+
+simulatedResults <- simulatedResults %>%
+  tidyr::separate(col = comparisonName,sep = " vs. ",into = c("reference","target"),remove = FALSE) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2))
+
+simulatedResults %>%
+  ggplot(aes(x = sampCount,y = ..density..,fill = type)) +
+  geom_histogram() +
+  facet_wrap(refBarrel ~ targBarrel)
+```
+
+```{r}
+originalMethodCMCs_mini %>% 
+  group_by(comparisonName) %>%
+  summarise(originalMethod = sum(originalMethodClassif,na.rm = TRUE)) %>%
+  arrange(comparisonName) %>%
+  separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2),
+         type = ifelse(refBarrel == targBarrel,"match","non-match")) %>%
+  # dplyr::filter(type == "match") %>%
+  ggplot(aes(x = originalMethod,y = ..density..,fill = type)) +
+  geom_histogram() +
+  facet_wrap(~ type,scales = "free") +
+  facet_wrap(refBarrel ~ targBarrel)
+```
+
+Explore if barrel effects can be made random with an unknown mean and variance using f(model = "iid")
+
+```{r}
+inlaFit_barrelRandomInteraction_initial <- 
+  INLA::inla(formula = originalMethodClassif ~ 
+               -1 + 
+               # (barrelG + barrelC + barrelA + barrelZ + barrelR)^2 +
+               f(barrelG,model = "iid") +
+               f(barrelC,model = "iid") +
+               f(barrelA,model = "iid") +
+               f(barrelZ,model = "iid") +
+               f(barrelR,model = "iid") +
+               f(barrelGbarrelC,model = "iid") +
+               f(barrelGbarrelA,model = "iid") +
+               f(barrelGbarrelZ,model = "iid") +
+               f(barrelGbarrelR,model = "iid") +
+               f(barrelCbarrelA,model = "iid") +
+               f(barrelCbarrelZ,model = "iid") +
+               f(barrelCbarrelR,model = "iid") +
+               f(barrelAbarrelZ,model = "iid") +
+               f(barrelAbarrelR,model = "iid") +
+               f(barrelZbarrelR,model = "iid") +
+               f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+               f(cellID,model = "besag",graph = g),
+             family = "binomial",
+             Ntrials = 1,
+             data = originalMethodCMCs_mini %>%
+               dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+               mutate(refBarrel = factor(refBarrel),
+                      targBarrel = factor(targBarrel)) %>%
+               mutate(scanID = rep(1:(nrow(.)/64),each = 64),
+                      barrelID = rep(1:(nrow(.)/64),each = 64)) %>%
+               bind_cols(barrelIndicator %>%
+                           set_names(paste0("barrel",names(barrelIndicator)))) %>%
+               mutate(barrelGbarrelC = barrelG*barrelC,
+                      barrelGbarrelA = barrelG*barrelA,
+                      barrelGbarrelZ = barrelG*barrelZ,
+                      barrelGbarrelR = barrelG*barrelR,
+                      barrelCbarrelA = barrelC*barrelA,
+                      barrelCbarrelZ = barrelC*barrelZ,
+                      barrelCbarrelR = barrelC*barrelR,
+                      barrelAbarrelZ = barrelA*barrelZ,
+                      barrelAbarrelR = barrelA*barrelR,
+                      barrelZbarrelR = barrelZ*barrelR),
+             control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE)
+             # ,verbose = TRUE
+             # ,control.predictor = list(A = as.matrix(barrelIndicator))
+             ,control.inla = list(diagonal = 10,strategy = "gaussian",int.strategy = "eb")
+  )
+
+inlaFit_barrelRandomInteraction <- 
+  INLA::inla(formula = originalMethodClassif ~ 
+               -1 + 
+               # (barrelG + barrelC + barrelA + barrelZ + barrelR)^2 +
+               f(barrelG,model = "iid") +
+               f(barrelC,model = "iid") +
+               f(barrelA,model = "iid") +
+               f(barrelZ,model = "iid") +
+               f(barrelR,model = "iid") +
+               f(barrelGbarrelC,model = "iid") +
+               f(barrelGbarrelA,model = "iid") +
+               f(barrelGbarrelZ,model = "iid") +
+               f(barrelGbarrelR,model = "iid") +
+               f(barrelCbarrelA,model = "iid") +
+               f(barrelCbarrelZ,model = "iid") +
+               f(barrelCbarrelR,model = "iid") +
+               f(barrelAbarrelZ,model = "iid") +
+               f(barrelAbarrelR,model = "iid") +
+               f(barrelZbarrelR,model = "iid") +
+               f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+               f(cellID,model = "besag",graph = g),
+             family = "binomial",
+             Ntrials = 1,
+             data = originalMethodCMCs_mini %>%
+               dplyr::select(cellID,originalMethodClassif,refBarrel,targBarrel) %>%
+               mutate(refBarrel = factor(refBarrel),
+                      targBarrel = factor(targBarrel)) %>%
+               mutate(scanID = rep(1:(nrow(.)/64),each = 64),
+                      barrelID = rep(1:(nrow(.)/64),each = 64)) %>%
+               bind_cols(barrelIndicator %>%
+                           set_names(paste0("barrel",names(barrelIndicator)))) %>%
+               mutate(barrelGbarrelC = barrelG*barrelC,
+                      barrelGbarrelA = barrelG*barrelA,
+                      barrelGbarrelZ = barrelG*barrelZ,
+                      barrelGbarrelR = barrelG*barrelR,
+                      barrelCbarrelA = barrelC*barrelA,
+                      barrelCbarrelZ = barrelC*barrelZ,
+                      barrelCbarrelR = barrelC*barrelR,
+                      barrelAbarrelZ = barrelA*barrelZ,
+                      barrelAbarrelR = barrelA*barrelR,
+                      barrelZbarrelR = barrelZ*barrelR),
+             control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE,config = TRUE),
+             control.mode = list(result = inlaFit_barrelRandomInteraction_initial,restart = TRUE),
+             verbose = TRUE
+             # ,control.predictor = list(A = as.matrix(barrelIndicator))
+             # ,control.inla = list(diagonal = 10)
+  )
+
+# save(inlaFit_barrelRandomInteraction,file = "inlaFit_barrelRandomInteraction.RData")
+
+summary(inlaFit_barrelRandomInteraction)
+
+inlaFit_barrelRandomInteraction$summary.random %>%
+  map(function(dat){
+    
+    ggplot(data = dat,aes(x = ID,y = mean)) +
+      geom_point() +
+      geom_hline(yintercept = 0)
+    
+  })
+```
+
+```{r}
+inlaFit_barrelRandomInteraction$marginals.random$barrelG %>%
+  map_dfr(~ as.data.frame(.))
+
+inlaFit_barrelRandomInteraction$marginals.random %>%
+  # .[1] %>%
+  map2(.y = names(.),
+       function(dat,name){
+    
+    ggplot(data = dat %>%
+             map_dfr(~ as.data.frame(.x)) %>%
+             mutate(ind = as.factor(rep(1:3,each = nrow(.)/3))),
+           aes(x=x,y=y)) +
+      geom_line(aes(group = ind,colour = ind)) +
+           labs(title = name)
+    
+  })
+```
+
+
+```{r}
+originalMethodCMCs_mini %>%
+  mutate(postMean = inlaFit_barrelRandomInteraction$summary.fitted.values %>%
+           pull(mean)) %>%
+  filter(!is.na(originalMethodClassif)) %>%
+  arrange(targBarrel,refBarrel) %>%
+  mutate(barrels = paste0(refBarrel,targBarrel),
+         rowID = 1:nrow(.)) %>%
+  ggplot(aes(x=rowID,y=postMean,colour=targBarrel,shape = refBarrel)) +
+  geom_point() +
+  # theme(legend.position = "none")
+  theme_bw()
+```
+
+```{r}
+repData <- originalMethodCMCs_mini %>%
+  select(comparisonName,originalMethodClassif,type)
+
+simulatedResults <- map_dfr(1:100,
+                            function(rep){
+                              
+                              # samples parameters from posterior
+                              postSample <- INLA::inla.posterior.sample(n = 1,result = inlaFit_barrelRandomInteraction)
+                              
+                              # combines sampled parameter above into linear predictor
+                              postPredictor <- INLA::inla.posterior.sample.eval(fun = "Predictor",samples = postSample)
+                              
+                              # inverse link transforms linear predictor back to probability
+                              sampleProbs <- exp(postPredictor)/(1 + exp(postPredictor))
+                              
+                              repData %>%
+                                mutate(sampleProb = c(sampleProbs),
+                                       samp = map_dbl(sampleProb,~ rbinom(n = 1,size = 1,prob = .))) %>%
+                                mutate(samp = ifelse(is.na(originalMethodClassif),NA,samp)) %>%
+                                group_by(comparisonName,type) %>%
+                                summarise(sampCount = sum(samp,na.rm = TRUE),.groups = "drop") %>%
+                                mutate(postRep = rep)
+                              
+                            })
+
+simulatedResults <- simulatedResults %>%
+  tidyr::separate(col = comparisonName,sep = " vs. ",into = c("reference","target"),remove = FALSE) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2))
+
+save(simulatedResults,file = "simulatedResults.RData")
+
+# save(originalMethodCMCs_mini,file = "originalMethodCMCs_mini.RData")
+
+simulatedResults %>%
+  ggplot(aes(x = sampCount,y = ..density..,fill = type)) +
+  geom_histogram() +
+  facet_wrap(refBarrel ~ targBarrel)
+```
+
+
+```{r}
+simulatedResults %>%
+  left_join(originalMethodCMCs_mini %>%
+              group_by(comparisonName) %>%
+              summarise(obsCount = sum(originalMethodClassif,na.rm = TRUE)),
+            by = "comparisonName") %>%
+  group_by(comparisonName,type,refBarrel,targBarrel) %>%
+  summarise(pVal = mean(sampCount <= obsCount)) %>%
+  ggplot(aes(x=pVal,fill = type)) +
+  geom_histogram() +
+  facet_wrap(~ type)
+```
+
+```{r}
+simulatedResults %>%
+  group_by(type,sampCount) %>%
+  summarise(dens = n()) %>%
+  mutate(dens = dens/sum(dens)) %>%
+  ungroup()  %>%
+  mutate(misclass = ifelse((type == "match" & sampCount < 6) | (type == "non-match" & sampCount >= 6),TRUE,FALSE),
+         type = factor(type,levels = c("non-match","match"),labels = c("Non-match","Match"))) %>%
+  rename(Type = type) %>%
+  ggplot(aes(x = sampCount,y = dens,fill = Type)) +
+  geom_bar(aes(alpha = misclass),stat = "identity",position = "identity") +
+  theme_bw() +
+  # coord_cartesian(ylim = c(NA,.3),expand = FALSE) +
+  geom_vline(xintercept = 5.5,size = 1.25,linetype = "dashed") +
+  theme(legend.position = "bottom") +
+  scale_fill_manual(values = c("#E1BE6A","#6a8de1"),aesthetics = c("fill","colour")) +
+  scale_alpha_manual(values = c(.25,.85)) +
+  guides(alpha = "none") +
+  labs(x = "CMC Count",
+       y = "Probability")
+```
+
+
+```{r}
+simulatedResults %>%
+  mutate(misclass = ifelse((type == "match" & sampCount < 6) | (type == "non-match" & sampCount >= 6),TRUE,FALSE)) %>%
+  group_by(type) %>%
+  summarise(misclass = mean(misclass))
+
+simulatedResults %>%
+  mutate(misclass = ifelse((type == "match" & sampCount < 6) | (type == "non-match" & sampCount >= 6),TRUE,FALSE)) %>%
+  pull(misclass) %>%
+  mean()
+```
+
