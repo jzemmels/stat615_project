@@ -1,0 +1,212 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+library(tidyverse)
+library(INLA)
+```
+
+
+Fit alternative to the model to ensure that the barrel random effects is treated as a single parameter rather than dummy variables using method = "z" and the barrelIndicator matrix
+
+```{r}
+load("originalMethodCMCs_entireFourBarrels.RData")
+
+# originalMethodCMCs_entireFourBarrels <- originalMethodCMCs_entireFourBarrels %>%
+#   filter(!(refBarrel %in% c("U","R")) & !(targBarrel %in% c("U","R")))
+
+scanIndicator <- map_dfc(unique(c(originalMethodCMCs_entireFourBarrels$reference,originalMethodCMCs_entireFourBarrels$target)),
+                         function(scan){
+                           
+                           originalMethodCMCs_entireFourBarrels %>%
+                             mutate(scan = as.integer(ifelse(reference == scan | target == scan,1,0))) %>%
+                             dplyr::select(scan) %>%
+                             set_names(scan)
+                           
+                         })
+
+
+
+barrelIndicator <- map_dfc(unique(c(originalMethodCMCs_entireFourBarrels$refBarrel,originalMethodCMCs_entireFourBarrels$targBarrel)),
+                           function(barrel){
+                             
+                             originalMethodCMCs_entireFourBarrels %>%
+                               mutate(ret = as.integer(ifelse(refBarrel == barrel | targBarrel == barrel,1,NA))) %>%
+                               # mutate(ret = ifelse(refBarrel == barrel & targBarrel == barrel,2,
+                               #                     ifelse(refBarrel == barrel | targBarrel == barrel,1,0))) %>%
+                               dplyr::select(ret) %>%
+                               set_names(paste0("barrel",barrel))
+                             
+                             # originalMethodCMCs_entireFourBarrels %>%
+                             #   mutate(ref = ifelse(refBarrel == barrel,1,0),
+                             #          targ = ifelse(targBarrel == barrel,1,0)) %>%
+                             #   dplyr::select(ref,targ) %>%
+                             #   set_names(paste0("ref_",barrel),paste0("targ_",barrel))
+                             
+                           })
+
+# barrelInteractionIndicator <- map_dfc(1:3,
+#                                       function(colInd1){
+#                                         
+#                                         map_dfc((colInd1 + 1):4,
+#                                                 function(colInd2){
+#                                                   
+#                                                   data.frame(x = as.integer(c(barrelIndicator[,colInd1])*c(barrelIndicator[,colInd2]))) %>%
+#                                                     set_names(nm = paste0(names(barrelIndicator)[colInd1],names(barrelIndicator)[colInd2]))
+#                                                   
+#                                                 })
+#                                         
+#                                       })
+# 
+# barrelIndicator <- bind_cols(barrelIndicator,barrelInteractionIndicator)
+```
+
+
+```{r}
+originalMethodCMCs_grid <- expand.grid(colInd = 1:8,rowInd = 1:8) %>%
+  mutate(cellID = 1:64)
+
+adjacent <- matrix(0,nrow = nrow(originalMethodCMCs_grid),ncol = nrow(originalMethodCMCs_grid))
+
+for(ind in 1:nrow(originalMethodCMCs_grid)){
+  
+  #determine cells that are adjacent (including diagonal) with the cell of interest
+  dat <- originalMethodCMCs_grid %>%
+    dplyr::filter((abs(rowInd - originalMethodCMCs_grid[ind,]$rowInd) == 1 & abs(colInd - originalMethodCMCs_grid[ind,]$colInd) == 0) | 
+                    (abs(rowInd - originalMethodCMCs_grid[ind,]$rowInd) == 0 & abs(colInd - originalMethodCMCs_grid[ind,]$colInd) == 1) |
+                    ((abs(rowInd - originalMethodCMCs_grid[ind,]$rowInd) == 1 & abs(colInd - originalMethodCMCs_grid[ind,]$colInd) == 1)))
+  
+  #update adjacency matrix to define an edge between adjacent cells
+  for(i in 1:nrow(dat)){
+    
+    adjacent[originalMethodCMCs_grid[ind,]$cellID,dat[i,]$cellID] <- 1
+    adjacent[dat[i,]$cellID,originalMethodCMCs_grid[ind,]$cellID] <- 1
+    
+  }
+  
+}
+
+g = inla.read.graph(adjacent)
+```
+
+
+```{r}
+inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_matchInd <- 
+  INLA::inla(formula = originalMethodClassif ~ 
+               -1 + 
+               # (barrelG + barrelC + barrelA + barrelZ + barrelR)^2 +
+               f(barrelG,model = "iid",values = 1) +
+               f(barrelF,model = "iid",values = 1) +
+               f(barrelU,model = "iid",values = 1) +
+               f(barrelR,model = "iid",values = 1) +
+               f(matchInd,model = "iid",values = 1) +
+               # f(barrelGbarrelF,model = "iid",values = 1) +
+               # f(barrelGbarrelU,model = "iid",values = 1) +
+               # f(barrelGbarrelR,model = "iid",values = 1) +
+               # f(barrelFbarrelU,model = "iid",values = 1) +
+               # f(barrelFbarrelR,model = "iid",values = 1) +
+               # f(barrelUbarrelR,model = "iid",values = 1) +
+               f(scanID,model = "z",Z = as.matrix(scanIndicator),constr = TRUE) +
+               f(cellID,model = "besag",graph = g),
+             family = "binomial",
+             Ntrials = 1,
+             data = originalMethodCMCs_entireFourBarrels %>%
+               dplyr::select(cellID,originalMethodClassif) %>%
+               mutate(scanID = rep(1:(nrow(.)/64),each = 64)) %>%
+               bind_cols(barrelIndicator) %>%
+               mutate(originalMethodClassif = as.integer(originalMethodClassif),
+                      matchInd = as.integer(ifelse(rowSums(cbind(barrelG,barrelF,barrelU,barrelR),na.rm = TRUE) == 1,1,NA))),
+             control.compute = list(dic = TRUE,cpo = TRUE,waic = TRUE,config = TRUE)
+             # ,verbose = TRUE
+             ,num.threads = 2
+             # ,control.predictor = list(A = as.matrix(barrelIndicator))
+             ,control.inla = list(#diagonal = 10,
+               strategy = "gaussian",int.strategy = "eb")
+  )
+
+save(inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_matchInd,
+     file = "inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_matchInd.RData")
+```
+
+
+
+
+```{r}
+inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_matchInd$marginals.random[1:5] %>%
+  map(function(dat){
+    
+    map_dfr(dat,
+            function(dat1){
+              
+              as.data.frame(dat1)
+              
+            }) %>%
+      mutate(ind = 1) %>%
+      # mutate(ind = factor(rep(c(0,1),each = nrow(.)/2))) %>%
+      ggplot(aes(x=x,y=y,group = ind,colour = ind)) +
+      geom_line()
+    
+  })
+```
+
+
+
+```{r}
+repData <- originalMethodCMCs_entireFourBarrels %>%
+  select(comparisonName,originalMethodClassif,type)
+
+simulatedResults_modelz_entireFourBarrelsGFUR_initial_matchInd <- map_dfr(1:100,
+                                                                 function(rep){
+                                                                   
+                                                                   # samples parameters from posterior
+                                                                   postSample <- INLA::inla.posterior.sample(n = 1,result = inlaFit_barrelRandomInteraction_modelz_entireFourBarrelsGFUR_initial_matchInd)
+                                                                   
+                                                                   # combines sampled parameter above into linear predictor
+                                                                   postPredictor <- INLA::inla.posterior.sample.eval(fun = "Predictor",samples = postSample)
+                                                                   
+                                                                   # inverse link transforms linear predictor back to probability
+                                                                   sampleProbs <- exp(postPredictor)/(1 + exp(postPredictor))
+                                                                   
+                                                                   repData %>%
+                                                                     mutate(sampleProb = c(sampleProbs),
+                                                                            samp = map_dbl(sampleProb,~ rbinom(n = 1,size = 1,prob = .))) %>%
+                                                                     mutate(samp = ifelse(is.na(originalMethodClassif),NA,samp)) %>%
+                                                                     group_by(comparisonName,type) %>%
+                                                                     summarise(sampCount = sum(samp,na.rm = TRUE),.groups = "drop") %>%
+                                                                     mutate(postRep = rep)
+                                                                   
+                                                                 })
+
+simulatedResults_modelz_entireFourBarrelsGFUR_initial_matchInd <- simulatedResults_modelz_entireFourBarrelsGFUR_initial_matchInd %>%
+  tidyr::separate(col = comparisonName,sep = " vs. ",into = c("reference","target"),remove = FALSE) %>%
+  mutate(refBarrel = str_sub(reference,-2,-2),
+         targBarrel = str_sub(target,-2,-2))
+
+save(simulatedResults_modelz_entireFourBarrelsGFUR_initial_matchInd,file = "simulatedResults_modelz_entireFourBarrelsGFUR_initial_matchInd.RData")
+
+# save(originalMethodCMCs_entireFourBarrels,file = "originalMethodCMCs_entireFourBarrels.RData")
+
+originalMethodCMCs_entireFourBarrels %>% 
+  group_by(comparisonName) %>%
+  summarise(originalMethod = sum(originalMethodClassif,na.rm = TRUE)) %>%
+  arrange(comparisonName) %>%
+  separate(col = comparisonName,into = c("reference","target"),sep = " vs. ",remove = FALSE) %>%
+  dplyr::filter(reference != target) %>%
+  mutate(refBarrel = paste0("Barrel ",str_sub(reference,-2,-2)),
+         targBarrel = paste0("Barrel ",str_sub(target,-2,-2)),
+         type = ifelse(refBarrel == targBarrel,"match","non-match")) %>%
+  # dplyr::filter(type == "match") %>%
+  ggplot(aes(x = originalMethod,y = ..density..,fill = type)) +
+  geom_histogram() +
+  facet_wrap(~ type,scales = "free") +
+  facet_wrap(refBarrel ~ targBarrel) +
+  theme_bw()
+
+simulatedResults_modelz_entireFourBarrelsGFUR_initial_matchInd %>%
+  ggplot(aes(x = sampCount,y = ..density..,fill = type)) +
+  geom_histogram(binwidth = 1) +
+  facet_wrap(refBarrel ~ targBarrel)
+```
+
