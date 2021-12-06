@@ -1,0 +1,132 @@
+---
+title: "A Random-Effect Markov Random Field Model for Cartridge Case Comparison Algorithms"
+subtitle: "STAT 615 Final Project"
+author: "Joe Zemmels"
+output:
+  xaringan::moon_reader:
+    lib_dir: libs
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+---
+
+# Outline
+
+- Introduction
+
+- Data
+
+- Methods
+
+- Results
+
+- Discussion and Conclusion
+
+---
+
+class: inverse, center, middle
+
+# Introduction
+
+---
+
+# Cartridge Cases & Breech Face Impressions
+
+---
+
+# Congruent Matching Cells Algorithm
+
+---
+
+# CMC Count Distribution
+
+[Diagram showing a single cell, then a whole scan with CMC classifications, then multiple scans, then finally plot of CMC distribution]
+
+---
+
+# Scientific Question
+
+[Show Figure 1 of CMC count distributions in report]
+
+Can we obtain a model-based estimate for CMC method error rate?
+
+---
+
+class: inverse, center, middle
+
+# Data
+
+---
+
+# Pairwise Comparison CMC Data
+
+[Table and plot of CMC classifications as in the report]
+
+---
+
+# CMC Results
+
+[Plot of observed CMC results]
+
+---
+
+class: inverse, center, middle
+
+# Methods
+
+---
+
+# Random-Effects Markov Random Field Model
+
+- Model a single cell as a Bernoulli random variable
+
+- Ultimately, we are interested in the distribution of the sum of these Bernoulli random variables for each comparison.
+
+---
+
+# Integrated Nested LaPlace Approximation
+
+---
+
+class: inverse, center, middle
+
+# Results
+
+---
+
+# Simulation Procedure
+
+---
+
+# Simulated vs. Observed Results
+
+---
+
+# Barrel Random Effects
+
+[Plot of individual barrel random effect posteriors]
+
+---
+
+# Spatial Term
+
+[Spatial term plot]
+
+---
+
+# Discussion
+
+---
+
+class: inverse, center, middle
+
+# Conclusion
+
+---
+
+# Conclusion & Future Work
+
+---
+
+# References
