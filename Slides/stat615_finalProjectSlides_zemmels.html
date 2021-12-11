@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="" xml:lang="">
   <head>
-    <title>A Random-Effect Markov Random Field Model for Cartridge Case Comparison Algorithms</title>
+    <title>A Random-Effects Markov Random Field Model for Cartridge Case Comparison Algorithms</title>
     <meta charset="utf-8" />
     <meta name="author" content="Joe Zemmels" />
     <script src="libs/header-attrs-2.11/header-attrs.js"></script>
@@ -12,11 +12,13 @@
     <textarea id="source">
 class: center, middle, inverse, title-slide
 
-# A Random-Effect Markov Random Field Model for Cartridge Case Comparison Algorithms
+# A Random-Effects Markov Random Field Model for Cartridge Case Comparison Algorithms
 ## STAT 615 Final Project
 ### Joe Zemmels
 
 ---
+
+
 
 
 # Outline
@@ -29,7 +31,7 @@ class: center, middle, inverse, title-slide
 
 - Results
 
-- Discussion and Conclusion
+- Conclusion &amp; Future Work
 
 ---
 
@@ -37,27 +39,91 @@ class: inverse, center, middle
 
 # Introduction
 
+&lt;!-- --- --&gt;
+
+&lt;!-- # Cartridge Cases &amp; Breech Face Impressions --&gt;
+
+&lt;!-- - *Cartridge case* is a bullet casing --&gt;
+
+&lt;!-- - During firing, the cartridge case slams against back wall of the barrel --&gt;
+
+&lt;!--   - "Back wall" is called the *breech face* --&gt;
+
+&lt;!-- -- --&gt;
+
+&lt;!-- - Markings on the breech face "stamp" into the cartridge case --&gt;
+
+&lt;!--   - Markings are called *breech face impressions* --&gt;
+
+&lt;!--   - Considered as the barrel leaving its "fingerprint" on the cartridge case --&gt;
+
+&lt;!-- -- --&gt;
+
+&lt;!-- - Forensic examiners use breech face impressions to determine whether two cartridges match --&gt;
+
+&lt;!--   - "Match" means they were fired from the same barrel --&gt;
+
 ---
 
 # Cartridge Cases &amp; Breech Face Impressions
 
+&lt;img src="images/cartridgeCaseSideBySide_rotated.png" width="863" style="display: block; margin: auto;" /&gt;
+
+&lt;!-- The figure shows two cartridges cases. --&gt;
+&lt;!-- Take note of the striated markings on both cartridge cases. --&gt;
+&lt;!-- Examiners would study the markings to determine whether the two cartridge cases match --&gt;
+&lt;!-- Until recently, there has not been a method to quantitatively measure the similarity between two cartridge cases. --&gt;
+
+&lt;!-- 1.3 --&gt;
+
+&lt;!-- Attempt 2: 1 --&gt;
+
 ---
 
-# Congruent Matching Cells Algorithm
+# Congruent Matching Cells (CMC) Algorithm
+
+&lt;img src="images/kmOriginalMethod_combined.png" width="414" style="display: block; margin: auto;" /&gt;
+
+Partition two cartridge case scans into a grid of cells
+
+--
+
+Each cell is classified as a "Congruent Matching Cell" (CMC) or a "non-CMC"
+
+Measure the pair's similarity as the total number of CMCs, the *CMC count*
+
+--
+
+Truly matching cartridge case pairs should have a large CMC count
+
+
+&lt;!-- 1 --&gt;
+
+&lt;!-- Attempt 2: 0.8 --&gt;
 
 ---
 
-# CMC Count Distribution
+# CMC Method Error Rate
 
-[Diagram showing a single cell, then a whole scan with CMC classifications, then multiple scans, then finally plot of CMC distribution]
+&lt;img src="images/cmcDistributionFakeExample_edited.png" width="453" style="display: block; margin: auto;" /&gt;
 
----
+In practice, we don't know whether two cartridge cases truly match.
 
-# Scientific Question
+--
 
-[Show Figure 1 of CMC count distributions in report]
+We use a CMC count decision boundary to classify matches or non-matches
 
-Can we obtain a model-based estimate for CMC method error rate?
+- E.g., a CMC count greater than or equal to `\(6\)` implies that a pair is a match
+
+--
+
+For a decision boundary, what proportion of pairs will be misclassified?
+
+**Can we obtain a model-based estimate for the CMC method error rate?**
+
+&lt;!-- 1 --&gt;
+
+&lt;!-- Attempt 2: .9 --&gt;
 
 ---
 
@@ -69,13 +135,43 @@ class: inverse, center, middle
 
 # Pairwise Comparison CMC Data
 
-[Table and plot of CMC classifications as in the report]
+`\(102\)` cartridge cases fired from `\(4\)` barrels: `\(G, F, U,\)` and `\(R\)`
+
+- `\(\binom{102}{2} = 5151\)` total pairwise comparisons
+
+- `\(1254\)` known match comparisons, `\(3897\)` known non-match comparisons
+
+--
+
+Using an `\(8 \times 8\)` grid of cells, CMC counts were obtained for each pair
+
+- `\(5151*64 = 329664\)` total observations
+
+- Each observation is a `\(1\)` (CMC), `\(0\)` (non-CMC), or `NA` (not considered)
+
+
+|Cell Index |CMC Classif. |
+|:----------|:------------|
+|1, 1       |NA           |
+|1, 2       |1            |
+|1, 3       |0            |
+|1, 4       |1            |
+|...        |...          |
+
+
+&lt;!-- 1 --&gt;
+
+&lt;!-- 0.75 --&gt;
 
 ---
 
-# CMC Results
+# Example: Barrel F CMC Counts
 
-[Plot of observed CMC results]
+&lt;img src="images/barrelF_observedCounts.png" width="933" style="display: block; margin: auto;" /&gt;
+
+&lt;!-- .3 --&gt;
+
+&lt;!-- Attempt 2: 0.5 --&gt;
 
 ---
 
@@ -85,15 +181,137 @@ class: inverse, center, middle
 
 ---
 
-# Random-Effects Markov Random Field Model
 
-- Model a single cell as a Bernoulli random variable
+&lt;img src="images/gmrf_dependencyDiagram.png" width="522" style="display: block; margin: auto;" /&gt;
 
-- Ultimately, we are interested in the distribution of the sum of these Bernoulli random variables for each comparison.
+&lt;!-- 1.75 --&gt;
+
+&lt;!-- Attempt 2: 1.5 --&gt;
+
+&lt;!-- --- --&gt;
+
+&lt;!-- # Random-Effects Markov Random Field Model --&gt;
+
+&lt;!-- Model observation associated with a single cell as Bernoulli --&gt;
+
+&lt;!-- - Use GLM structure for the "success" probability --&gt;
+
+&lt;!-- - Incorporate barrel-level and scan-level repeated measure effect --&gt;
+
+&lt;!-- - Incorporate neighboring scan spatial effect as Markov Random Field --&gt;
 
 ---
 
-# Integrated Nested LaPlace Approximation
+Index scans `\(i,j = 1,...,102\)`. 
+&lt;!-- Define set of barrels `\(\pmb{B} = \{G,F,U,R\}\)`. --&gt;
+
+- Denote `\(i,j\)` as comparison between scan `\(i\)` and scan `\(j\)`
+
+&lt;!-- - Define `\(b(\cdot)\)` as function mapping a scan to its barrel of origin --&gt;
+
+- Use row and column indexing for each cell: `\([r,c]\)`, `\(r,c = 1,...,8\)`
+
+- E.g., `\(y_{i,j,[r,c]}\)` is `\([r,c]\)`th observation from comparison `\(i,j\)`
+
+--
+
+Assume `\(y_{i,j,[r,c]} | p_{i,j,[r,c]} \overset{ind}{\sim} Bern(p_{i,j,[r,c]})\)` where
+
+`\begin{align*}
+\text{logit}(p_{i,j,[r,c]}) =  &amp;\underbrace{\sum_{A \in \{G,F,U,R\}} \beta_A \cdot I\left(\text{scan } i \text{ or scan } j \text { originated from barrel } A\right)}_{\text{Barrel-level Random Effect}} \\
+&amp; + \underbrace{\sum_{...} \gamma_{AC} \cdot I\left(\text{barrel } A \text{ scan is compared to barrel } C \text{ scan}\right)}_{\text{Barrel-level Interaction}} \\
+&amp; + \underbrace{\kappa_i + \kappa_j}_{\text{Scan-level R.E.}} + \underbrace{\lambda_{[r,c]}}_{\text{MRF Term}}
+\end{align*}`
+
+where `\(``..."\)` is `\(A,C \in \{G,F,U,R\}: A \neq C\)`
+
+&lt;!-- 1.3 --&gt;
+
+&lt;!-- Attempt 2: 1.16 --&gt;
+
+---
+
+Assume independence and for `\(i = 1,...,S\)` and `\(A, C \in \{G,F,U,R\}\)`:
+`\begin{align*}
+\beta_{A} &amp;\overset{ind}{\sim} N(0,\tau_{A}^{-1}) \\
+\tau_{A} &amp;\overset{ind}{\sim} Gam(1,0.00005) \\
+\gamma_{AC} &amp;\overset{ind}{\sim} N(0,\tau_{AC}^{-1}) \\
+\tau_{AC} &amp;\overset{ind}{\sim} Gam(1,0.00005) \\
+\kappa_i &amp;\overset{ind}{\sim} N(0,\tau_{k}^{-1}) \\
+\tau_{k} &amp;\sim Gam(1,0.00005).
+\end{align*}`
+
+--
+
+For `\(\pmb{\lambda}_{-[r,c]} \equiv \{\lambda_{m,n} : m \neq r, n \neq c\}\)` and `\(\mathcal{N}_{[r,c]}\)` is an 8-neighborhood:
+
+`\begin{align*}
+\lambda_{[r,c]} | \pmb{\lambda}_{-[r,c]}, \tau_l &amp;\overset{ind}{\sim} N\left(\frac{1}{|\mathcal{N}_{[r,c]}|} \sum_{\lambda_{m,n} \in \mathcal{N}_{[r,c]}} \lambda_{[m,n]}, \frac{\tau_l^{-1}}{|\mathcal{N}_{[r,c]}|}\right) \\
+\tau_l &amp;\sim Gam(1,0.00005).
+\end{align*}`
+
+&lt;img src="images/MRF_8neighborhood.jpg" width="95" style="display: block; margin: auto;" /&gt;
+
+&lt;!-- 0.75 --&gt;
+
+&lt;!-- Attmept 2: .58 --&gt;
+---
+
+# Integrated Nested Laplace Approximation
+
+Uses deterministic approximations of univariate posterior marginals.
+
+For parameter vector `\(\phi\)` and hyperparameter vector `\(\theta\)`:
+
+`\begin{align*}
+\pi(\theta_j | y) &amp;= \int p(\theta)\ d\theta_{-j} \\
+\pi(\phi_i | y) &amp;= \int p(\phi_i | \theta, y) p(\theta | y)\ d\theta.
+\end{align*}`
+
+Use numeric integration to estimate these integrals.
+
+For a particular value `\(\theta^k\)`, integrands are proportional to:
+
+`\begin{align*}
+p(\theta | y) \propto \frac{p(y | \phi, \theta) p(\phi, \theta) p(\theta)}{p(\phi | \theta, y)} \\
+p(\phi_i | \theta^k,y) \propto \frac{p(y | \phi, \theta^k) p(\phi,\theta^k) p(\theta^k)}{p(\theta_{-i} | \phi_i, \theta^k, y)}.
+\end{align*}`
+
+Use a Laplace approximation to estimate these denominators.
+
+&lt;!-- 0.3 --&gt;
+
+&lt;!-- Attempt 2: 0.3 --&gt;
+
+---
+
+### Scientific Question Simulation Procedure
+
+We have modeled observations associated with a single cell: `\(y_{i,j,[r,c]}\)`.
+
+We are primarily interested in the CMC counts:
+
+`$$C_{i,j} = \sum_{r,c} y_{i,j,[r,c]}.$$`
+
+--
+
+We'll use simulation. Repeat for `\(t = 1,...,T\)`:
+
+- Sample `\(p_{i,j,[r,c]}^{(t)}\)` for each `\(i,j = 1,...,102\)` and `\(r,c = 1,...,8\)`
+
+- Sample `\(y_{i,j,[r,c]}^{(t)} | p_{i,j,[r,c]}^{(t)} \overset{ind}{\sim} Bern(p_{i,j,[r,c]}^{(t)})\)` for each `\(i,j,r,c\)`.
+
+- Compute `\(C_{i,j}^{(t)} = \sum_{r,c} y_{i,j,[r,c]}^{(t)}\)` for each `\(i,j\)`.
+
+--
+
+Using a decision boundary of `\(6\)` CMCs, estimated error is:
+
+`$$\widehat{\text{Error}} = \frac{1}{T} \sum_{t=1}^{T} \left(\frac{1}{5151} \sum_{i,j\text{ match}} I\left(C_{i,j}^{(t)} &lt; 6\right) + \sum_{i,j\text{ do not match}}I\left(C_{i,j}^{(t)} \geq 6\right)\right).$$`
+
+&lt;!-- 2 --&gt;
+
+&lt;!-- Attempt 2: 1.75 --&gt;
 
 ---
 
@@ -103,41 +321,138 @@ class: inverse, center, middle
 
 ---
 
-# Simulation Procedure
+&lt;img src="images/observedVsSimulatedResults.png" width="524" style="display: block; margin: auto;" /&gt;
+
+
+|Error          | Observed| Simulated|
+|:--------------|--------:|---------:|
+|Overall        |    0.084|     0.071|
+|False Positive |    0.017|     0.020|
+|False Negative |    0.293|     0.228|
+
+&lt;!-- 1 --&gt;
+
+&lt;!-- Attempt 2: .9 --&gt;
 
 ---
 
-# Simulated vs. Observed Results
+### Barrel-level Random Effects Estimated Posterior Densities
+
+&lt;img src="images/barrelRandomEffects.png" width="2000" style="display: block; margin: auto;" /&gt;
 
 ---
 
-# Barrel Random Effects
+### Scan-level Random Effects Credible Intervals
 
-[Plot of individual barrel random effect posteriors]
-
----
-
-# Spatial Term
-
-[Spatial term plot]
+&lt;img src="images/scanRandomEffects.png" width="440" style="display: block; margin: auto;" /&gt;
 
 ---
 
-# Discussion
+### Spatial Term `\(\lambda_{[r,c]}\)` Estimated Posterior Densities
+
+&lt;img src="images/cellRandomEffects.png" width="749" style="display: block; margin: auto;" /&gt;
+
+&lt;!-- 0.9 --&gt;
+
+&lt;!-- Attempt 2: 1.1 --&gt;
+
+---
+
+### Hyperparameter Estimated Posterior Densities
+
+&lt;img src="images/hyperparameterPosteriors.png" width="2000" style="display: block; margin: auto;" /&gt;
 
 ---
 
 class: inverse, center, middle
 
-# Conclusion
+# Conclusion &amp; Future Work
 
 ---
 
 # Conclusion &amp; Future Work
 
+Error rate seems to be underestimated by model
+
+- In particular, false negative rate is underestimated
+
+Parameter estimates are interpretable
+
+- CMC counts for match comparisons differ across barrels
+
+- Certain scans have lower CMC counts, on average
+
+- Cells on edge of scans are classified as CMCs more often
+
+--
+
+Future Work:
+
+- Explore other models/fitting procedures (STAN, etc.)
+
+  - Overdispersion correction
+  
+  - Barrel-level mixture model
+
+- Score-based likelihood ratio estimation for Common Source problem
+
+&lt;!-- 1 --&gt;
+
+&lt;!-- Attempt 2: .6 --&gt;
+
 ---
 
 # References
+
+Havard Rue, Sara Martino, and Nicholas Chopin (2009), Approximate Bayesian Inference for Latent Gaussian Models Using Integrated Nested Laplace Approximations (with discussion), Journal of the Royal Statistical Society B, 71, 319-392.
+
+Finn Lindgren, Havard Rue (2015).  Bayesian Spatial Modelling with R-INLA.  Journal of Statistical Software, 63(19), 1-25.  URL http://www.jstatsoft.org/v63/i19/.
+
+J. Song. Proposed “NIST Ballistics Identification System (NBIS)” Based on 3D Topography Measurements on Correlation Cells. American Firearm and Tool Mark Examiners Journal, 45(2):11, 2013. URL https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=910868. 
+
+Zhang, N. F. (2019). The Use of Correlated Binomial Distribution in Estimating Error Rates for Firearm Evidence Identification. In Journal of Research of the National Institute of Standards and Technology (Vol. 124). National Institute of Standards and Technology (NIST). https://doi.org/10.6028/jres.124.026
+
+---
+
+class: inverse, center, middle
+
+## Thank you!
+
+---
+
+class: inverse, center, middle
+
+# Appendix
+
+---
+
+# The Congruent Matching Cells Algorithm
+
+Partition one of two cartridge case scans into a grid of cells
+
+Estimate where each cell "registers" (rotation + translation) in the other scan
+
+&lt;img src="images/cmc_illustration.PNG" width="610" style="display: block; margin: auto;" /&gt;
+
+--
+
+Classify a cell as a "CMC" if it finds its registration in the other scan
+
+---
+
+# CMC Count Similarity Score
+
+Determine all congruent matching cells in both directions
+
+Use total number of cells classified as CMCs (sans repeats) as similarity score
+
+&lt;img src="images/kmOriginalMethod_combined.png" width="591" style="display: block; margin: auto;" /&gt;
+
+---
+
+# Barrel-wise CMC Count Distributions
+
+&lt;img src="images/cmcDistributionObserved_faceted.png" width="2000" style="display: block; margin: auto;" /&gt;
     </textarea>
 <style data-target="print-only">@media screen {.remark-slide-container{display:block;}.remark-slide-scaler{box-shadow:none;}}</style>
 <script src="https://remarkjs.com/downloads/remark-latest.min.js"></script>
