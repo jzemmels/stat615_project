@@ -27,6 +27,8 @@ knitr::opts_chunk$set(fig.align = "center",echo = FALSE,warning = FALSE,message 
 
 - Conclusion & Future Work
 
+Slides are available here: [https://jzemmels.github.io/stat615_project/](https://jzemmels.github.io/stat615_project/)
+
 ---
 
 class: inverse, center, middle
